@@ -2,18 +2,17 @@ package me.asonsss.manhunt;
 
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
+import org.bukkit.Chunk;
 import org.bukkit.GameMode;
-import org.bukkit.GameRule;
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
-import org.bukkit.Sound;
+import org.bukkit.Registry;
 import org.bukkit.StructureType;
 import org.bukkit.World;
 import org.bukkit.WorldBorder;
 import org.bukkit.WorldCreator;
 import org.bukkit.WorldType;
-import org.bukkit.attribute.Attribute;
 import org.bukkit.attribute.AttributeInstance;
 import org.bukkit.block.Block;
 import org.bukkit.boss.BarColor;
@@ -62,6 +61,7 @@ import org.bukkit.scoreboard.Objective;
 import org.bukkit.scoreboard.Scoreboard;
 import org.bukkit.scoreboard.Team;
 
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -78,14 +78,14 @@ import java.util.UUID;
 import java.util.stream.Collectors;
 
 /**
- * Полный исходный код плагина: Asonsss_manhunt (Версия 1.3.0)
+ * Полный исходный код плагина: Asonsss_manhunt (Версия 1.3.1 — Bugfix Release)
  *
  * ======================== 1. ФАЙЛ src/main/resources/plugin.yml ========================
  * name: Asonsss_manhunt
- * version: '1.3.0'
+ * version: '1.3.1'
  * main: me.asonsss.manhunt.AsonsssManhunt
  * api-version: '1.21'
- * description: Manhunt plugin v1.3.0 with waiting barrier box, combat pause lock, compass command, scoreboard and dimensional tracking
+ * description: Manhunt plugin v1.3.1 with waiting barrier box, combat pause lock, compass command, scoreboard and dimensional tracking
  * commands:
  *   manhunt:
  *     description: Основная команда управления Manhunt
@@ -119,7 +119,7 @@ import java.util.stream.Collectors;
  *     <modelVersion>4.0.0</modelVersion>
  *     <groupId>me.asonsss</groupId>
  *     <artifactId>Asonsss_manhunt</artifactId>
- *     <version>1.3.0</version>
+ *     <version>1.3.1</version>
  *     <packaging>jar</packaging>
  *     <properties>
  *         <maven.compiler.source>21</maven.compiler.source>
@@ -217,11 +217,16 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         }
     }
 
+    // Звуки через строковые ключи (безопасно для 1.21.3+ / 26.3, где Sound стал интерфейсом)
+    private static final String SOUND_NOTE_PLING = "block.note_block.pling";
+    private static final String SOUND_LEVELUP = "entity.player.levelup";
+    private static final String SOUND_CHALLENGE_COMPLETE = "ui.toast.challenge_complete";
+
     private static final String TEAM_SPEEDRUNNER = "mh_speedrunner";
     private static final String TEAM_HUNTERS = "mh_hunters";
     private static final String OBJECTIVE_SIDEBAR = "mh_sidebar";
     private static final double PRE_GAME_BORDER_SIZE = 30.0;
-    private static final double DEFAULT_MINECRAFT_BORDER = 60000000.0; // Стандартная граница (радиус 30 млн блоков)
+    private static final double DEFAULT_MINECRAFT_BORDER = 60000000.0; // Стандартная граница (30 млн блоков)
     private static final long IMPOSSIBLE_TIME_LIMIT_SECONDS = 4L * 60L * 60L; // 4 часа = 14400 секунд
     private static final int MAX_PAUSE_SECONDS = 180;
     private static final long PAUSE_COOLDOWN_MILLIS = 10L * 60L * 1000L; // 10 минут
@@ -286,7 +291,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         startCompassAndEffectTask();
         startScoreboardAndTimerTask();
 
-        getLogger().info("Asonsss_manhunt v1.3.0 успешно запущен!");
+        getLogger().info("Asonsss_manhunt v1.3.1 успешно запущен!");
     }
 
     @Override
@@ -315,24 +320,28 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     }
 
     private void setupScoreboardTeams() {
-        Scoreboard mainBoard = Bukkit.getScoreboardManager() != null
-                ? Bukkit.getScoreboardManager().getMainScoreboard()
-                : null;
-        if (mainBoard == null) return;
+        try {
+            Scoreboard mainBoard = Bukkit.getScoreboardManager() != null
+                    ? Bukkit.getScoreboardManager().getMainScoreboard()
+                    : null;
+            if (mainBoard == null) return;
 
-        Team srTeam = mainBoard.getTeam(TEAM_SPEEDRUNNER);
-        if (srTeam == null) {
-            srTeam = mainBoard.registerNewTeam(TEAM_SPEEDRUNNER);
-        }
-        srTeam.setColor(ChatColor.RED);
-        srTeam.setPrefix(ChatColor.RED.toString());
+            Team srTeam = mainBoard.getTeam(TEAM_SPEEDRUNNER);
+            if (srTeam == null) {
+                srTeam = mainBoard.registerNewTeam(TEAM_SPEEDRUNNER);
+            }
+            srTeam.setColor(ChatColor.RED);
+            srTeam.setPrefix(ChatColor.RED.toString());
 
-        Team hunterTeam = mainBoard.getTeam(TEAM_HUNTERS);
-        if (hunterTeam == null) {
-            hunterTeam = mainBoard.registerNewTeam(TEAM_HUNTERS);
+            Team hunterTeam = mainBoard.getTeam(TEAM_HUNTERS);
+            if (hunterTeam == null) {
+                hunterTeam = mainBoard.registerNewTeam(TEAM_HUNTERS);
+            }
+            hunterTeam.setColor(ChatColor.BLUE);
+            hunterTeam.setPrefix(ChatColor.BLUE.toString());
+        } catch (Throwable t) {
+            getLogger().warning("Не удалось инициализировать команды Scoreboard: " + t.getMessage());
         }
-        hunterTeam.setColor(ChatColor.BLUE);
-        hunterTeam.setPrefix(ChatColor.BLUE.toString());
     }
 
     // =========================================================================
@@ -343,23 +352,30 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
         String cmdName = command.getName().toLowerCase(Locale.ROOT);
 
-        switch (cmdName) {
-            case "manhunt":
-                return handleManhuntCommand(sender, args);
-            case "sp":
-                return handleSpCommand(sender, args);
-            case "ready":
-                return handleReadyCommand(sender, true);
-            case "unready":
-                return handleReadyCommand(sender, false);
-            case "fortrest":
-                return handleFortrestCommand(sender);
-            case "pause":
-                return handlePauseCommand(sender, args);
-            case "compass":
-                return handleCompassCommand(sender);
-            default:
-                return false;
+        try {
+            switch (cmdName) {
+                case "manhunt":
+                    return handleManhuntCommand(sender, args);
+                case "sp":
+                    return handleSpCommand(sender, args);
+                case "ready":
+                    return handleReadyCommand(sender, true);
+                case "unready":
+                    return handleReadyCommand(sender, false);
+                case "fortrest":
+                    return handleFortrestCommand(sender);
+                case "pause":
+                    return handlePauseCommand(sender, args);
+                case "compass":
+                    return handleCompassCommand(sender);
+                default:
+                    return false;
+            }
+        } catch (Throwable t) {
+            sender.sendMessage(ChatColor.RED + "Ошибка при выполнении команды: " + t.getClass().getSimpleName() + ": " + t.getMessage());
+            getLogger().severe("Ошибка при выполнении команды /" + label + ":");
+            t.printStackTrace();
+            return true;
         }
     }
 
@@ -621,7 +637,12 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
             }
         }
 
-        Location fortressLoc = world.locateNearestStructure(origin, StructureType.NETHER_FORTRESS, 100, false);
+        Location fortressLoc = null;
+        try {
+            fortressLoc = world.locateNearestStructure(origin, StructureType.NETHER_FORTRESS, 100, false);
+        } catch (Throwable ignored) {
+        }
+
         if (fortressLoc == null) {
             player.sendMessage(ChatColor.RED + "[Manhunt] Не удалось найти ближайшую крепость Незера поблизости.");
         } else {
@@ -635,7 +656,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     }
 
     // =========================================================================
-    // НОВАЯ КОМАНДА /compass (/c) ДЛЯ ОХОТНИКОВ
+    // КОМАНДА /compass (/c) ДЛЯ ОХОТНИКОВ
     // =========================================================================
 
     private boolean handleCompassCommand(CommandSender sender) {
@@ -765,7 +786,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
                             pauseBossBar.setProgress(Math.max(0.0, Math.min(1.0, preCountdown / 10.0)));
                         }
                         for (Player p : Bukkit.getOnlinePlayers()) {
-                            p.playSound(p.getLocation(), Sound.BLOCK_NOTE_BLOCK_PLING, 1.0f, 2.0f);
+                            playSoundSafe(p, SOUND_NOTE_PLING, 1.0f, 2.0f);
                         }
                         preCountdown--;
                         return;
@@ -789,7 +810,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
                         for (Player p : Bukkit.getOnlinePlayers()) {
                             p.sendTitle(ChatColor.AQUA + String.valueOf(remainingPause),
                                     ChatColor.YELLOW + "До возобновления игры...", 0, 25, 5);
-                            p.playSound(p.getLocation(), Sound.BLOCK_NOTE_BLOCK_PLING, 1.0f, 1.5f);
+                            playSoundSafe(p, SOUND_NOTE_PLING, 1.0f, 1.5f);
                         }
                     }
 
@@ -802,10 +823,10 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     }
 
     private void applyFreezeState(int pauseSeconds) {
-        Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "tick freeze");
+        dispatchConsoleCommandSafe("tick freeze");
 
         savedEffectsDuringPause.clear();
-        PotionEffectType slowType = resolvePotionEffect("SLOWNESS", "SLOW");
+        PotionEffectType slowType = resolvePotionEffect("slowness", "SLOWNESS", "SLOW");
         int ticks = (pauseSeconds + 5) * 20;
 
         for (Player p : Bukkit.getOnlinePlayers()) {
@@ -830,7 +851,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
                 + "Пауза окончена! Игра продолжается. Следующая пауза будет доступна через 10 минут.");
         for (Player p : Bukkit.getOnlinePlayers()) {
             p.sendTitle(ChatColor.GREEN + "Игра продолжается!", "", 5, 30, 10);
-            p.playSound(p.getLocation(), Sound.ENTITY_PLAYER_LEVELUP, 1.0f, 1.2f);
+            playSoundSafe(p, SOUND_LEVELUP, 1.0f, 1.2f);
         }
     }
 
@@ -849,12 +870,9 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         gamePaused = false;
 
         if (wasPaused || unfreezeWorld) {
-            try {
-                Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "tick unfreeze");
-            } catch (Exception ignored) {
-            }
+            dispatchConsoleCommandSafe("tick unfreeze");
 
-            PotionEffectType slowType = resolvePotionEffect("SLOWNESS", "SLOW");
+            PotionEffectType slowType = resolvePotionEffect("slowness", "SLOWNESS", "SLOW");
             for (Player p : Bukkit.getOnlinePlayers()) {
                 p.setWalkSpeed(0.2f);
                 p.setFlySpeed(0.1f);
@@ -889,7 +907,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         scoreboardAndTimerTask = new BukkitRunnable() {
             @Override
             public void run() {
-                // Во время подготовки удерживаем время мира на 0 и сытость игроков
+                // Во время подготовки удерживаем время мира на 0
                 if (isPreparationStage() || gameState == GameState.COUNTDOWN) {
                     World overworld = getMainOverworld();
                     if (overworld != null) {
@@ -922,78 +940,84 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
 
     private void updateSidebarScoreboard() {
         if (!scoreboardActive || Bukkit.getScoreboardManager() == null) return;
-        Scoreboard board = Bukkit.getScoreboardManager().getMainScoreboard();
+        try {
+            Scoreboard board = Bukkit.getScoreboardManager().getMainScoreboard();
 
-        Objective oldObj = board.getObjective(OBJECTIVE_SIDEBAR);
-        if (oldObj != null) {
-            oldObj.unregister();
-        }
-
-        Objective obj = board.registerNewObjective(
-                OBJECTIVE_SIDEBAR,
-                "dummy",
-                ChatColor.GOLD + "" + ChatColor.BOLD + "✦ "
-                        + ChatColor.RED + ChatColor.BOLD + "ᴀꜱᴏɴꜱꜱꜱ "
-                        + ChatColor.BLUE + ChatColor.BOLD + "ᴍᴀɴʜᴜɴᴛ"
-                        + ChatColor.GOLD + ChatColor.BOLD + " ✦"
-        );
-        obj.setDisplaySlot(DisplaySlot.SIDEBAR);
-
-        // Цвет выбранной сложности такой же, как в /manhunt difficulty info
-        String diffText = selectedDifficulty != null
-                ? selectedDifficulty.getColoredDisplayName()
-                : ChatColor.GRAY + "Не выбран";
-
-        String runnerName = "Не выбран";
-        if (speedrunnerUuid != null) {
-            Player sr = Bukkit.getPlayer(speedrunnerUuid);
-            if (sr != null) {
-                runnerName = sr.getName();
-            } else {
-                runnerName = Bukkit.getOfflinePlayer(speedrunnerUuid).getName();
-                if (runnerName == null) runnerName = "Выбран";
+            Objective oldObj = board.getObjective(OBJECTIVE_SIDEBAR);
+            if (oldObj != null) {
+                oldObj.unregister();
             }
-        }
 
-        String timerLabel;
-        String timerValue;
-        if (selectedDifficulty == DifficultyMode.IMPOSSIBLE) {
-            long remaining = Math.max(0L, IMPOSSIBLE_TIME_LIMIT_SECONDS - elapsedGameSeconds);
-            timerLabel = ChatColor.LIGHT_PURPLE + "Осталось времени до конца: ";
-            timerValue = ChatColor.RED + formatHhMmSs(remaining);
-        } else {
-            timerLabel = ChatColor.YELLOW + "Время: ";
-            timerValue = ChatColor.GREEN + formatHhMmSs(elapsedGameSeconds);
-        }
+            Objective obj = board.registerNewObjective(
+                    OBJECTIVE_SIDEBAR,
+                    "dummy",
+                    ChatColor.GOLD + "" + ChatColor.BOLD + "✦ "
+                            + ChatColor.RED + ChatColor.BOLD + "ᴀꜱᴏɴꜱꜱꜱ "
+                            + ChatColor.BLUE + ChatColor.BOLD + "ᴍᴀɴʜᴜɴᴛ"
+                            + ChatColor.GOLD + ChatColor.BOLD + " ✦"
+            );
+            obj.setDisplaySlot(DisplaySlot.SIDEBAR);
 
-        List<String> lines = Arrays.asList(
-                ChatColor.WHITE + "Сложность: " + diffText,
-                ChatColor.DARK_GRAY + "====================",
-                ChatColor.WHITE + "Спидранер: " + ChatColor.RED + runnerName,
-                ChatColor.WHITE + "Охотники: " + ChatColor.BLUE + hunterUuids.size(),
-                ChatColor.DARK_GRAY + "====================§r",
-                timerLabel + timerValue,
-                ChatColor.DARK_GRAY + "====================§7",
-                ChatColor.GOLD + "/manhunt info - информация о моде"
-        );
+            String diffText = selectedDifficulty != null
+                    ? selectedDifficulty.getColoredDisplayName()
+                    : ChatColor.GRAY + "Не выбран";
 
-        int score = lines.size();
-        for (String line : lines) {
-            obj.getScore(line).setScore(score--);
-        }
+            String runnerName = "Не выбран";
+            if (speedrunnerUuid != null) {
+                Player sr = Bukkit.getPlayer(speedrunnerUuid);
+                if (sr != null) {
+                    runnerName = sr.getName();
+                } else {
+                    runnerName = Bukkit.getOfflinePlayer(speedrunnerUuid).getName();
+                    if (runnerName == null) runnerName = "Выбран";
+                }
+            }
 
-        for (Player p : Bukkit.getOnlinePlayers()) {
-            p.setScoreboard(board);
+            String timerLabel;
+            String timerValue;
+            if (selectedDifficulty == DifficultyMode.IMPOSSIBLE) {
+                long remaining = Math.max(0L, IMPOSSIBLE_TIME_LIMIT_SECONDS - elapsedGameSeconds);
+                timerLabel = ChatColor.LIGHT_PURPLE + "Осталось времени до конца: ";
+                timerValue = ChatColor.RED + formatHhMmSs(remaining);
+            } else {
+                timerLabel = ChatColor.YELLOW + "Время: ";
+                timerValue = ChatColor.GREEN + formatHhMmSs(elapsedGameSeconds);
+            }
+
+            List<String> lines = Arrays.asList(
+                    ChatColor.WHITE + "Сложность: " + diffText,
+                    ChatColor.DARK_GRAY + "====================",
+                    ChatColor.WHITE + "Спидранер: " + ChatColor.RED + runnerName,
+                    ChatColor.WHITE + "Охотники: " + ChatColor.BLUE + hunterUuids.size(),
+                    ChatColor.DARK_GRAY + "====================§r",
+                    timerLabel + timerValue,
+                    ChatColor.DARK_GRAY + "====================§7",
+                    ChatColor.GOLD + "/manhunt info - информация о моде"
+            );
+
+            int score = lines.size();
+            for (String line : lines) {
+                obj.getScore(line).setScore(score--);
+            }
+
+            for (Player p : Bukkit.getOnlinePlayers()) {
+                p.setScoreboard(board);
+            }
+        } catch (Throwable t) {
+            getLogger().warning("Ошибка обновления Scoreboard: " + t.getMessage());
         }
     }
 
     private void clearSidebarScoreboard() {
         scoreboardActive = false;
-        if (Bukkit.getScoreboardManager() == null) return;
-        Scoreboard board = Bukkit.getScoreboardManager().getMainScoreboard();
-        Objective obj = board.getObjective(OBJECTIVE_SIDEBAR);
-        if (obj != null) {
-            obj.unregister();
+        try {
+            if (Bukkit.getScoreboardManager() == null) return;
+            Scoreboard board = Bukkit.getScoreboardManager().getMainScoreboard();
+            Objective obj = board.getObjective(OBJECTIVE_SIDEBAR);
+            if (obj != null) {
+                obj.unregister();
+            }
+        } catch (Throwable ignored) {
         }
     }
 
@@ -1009,6 +1033,16 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     // =========================================================================
 
     private Location buildWaitingBox(World world) {
+        // Гарантируем загрузку чанков вокруг (0, 0) перед постройкой коробки и телепортацией
+        for (int cx = -1; cx <= 1; cx++) {
+            for (int cz = -1; cz <= 1; cz++) {
+                Chunk chunk = world.getChunkAt(cx, cz);
+                if (!chunk.isLoaded()) {
+                    chunk.load(true);
+                }
+            }
+        }
+
         for (int x = BOX_MIN_X; x <= BOX_MAX_X; x++) {
             for (int y = BOX_MIN_Y; y <= BOX_MAX_Y; y++) {
                 for (int z = BOX_MIN_Z; z <= BOX_MAX_Z; z++) {
@@ -1021,7 +1055,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
             }
         }
         waitingBoxBuilt = true;
-        return new Location(world, 0.5, BOX_MIN_Y + 1.0, 0.5);
+        return new Location(world, 0.5, BOX_MIN_Y + 1.0, 0.5, 0.0f, 0.0f);
     }
 
     private void removeWaitingBox() {
@@ -1043,6 +1077,10 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     }
 
     private int getHighestSurfaceYIgnoringBarriers(World world, int x, int z) {
+        Chunk chunk = world.getChunkAt(x >> 4, z >> 4);
+        if (!chunk.isLoaded()) {
+            chunk.load(true);
+        }
         int maxY = world.getMaxHeight() - 1;
         int minY = world.getMinHeight();
         for (int y = maxY; y >= minY; y--) {
@@ -1055,34 +1093,44 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     }
 
     private void applyPreparationWorldRules(World overworld, Location boxSpawn) {
+        // 1. Выключаем ПВП и фиксируем время на 0
         for (World w : Bukkit.getWorlds()) {
-            w.setPVP(false);
-            w.setGameRule(GameRule.DO_DAYLIGHT_CYCLE, false);
-            w.setTime(0L);
+            try {
+                w.setPVP(false);
+                w.setTime(0L);
+            } catch (Throwable ignored) {
+            }
         }
+        dispatchConsoleCommandSafe("gamerule doDaylightCycle false");
+        dispatchConsoleCommandSafe("gamerule spawnRadius 0");
+        dispatchConsoleCommandSafe("time set 0");
+
+        // 2. Устанавливаем мировой спавнпоинт прямо внутри коробки из барьеров (0, 251, 0)
+        chosenStartLocation = boxSpawn.clone();
         try {
-            Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "time set 0");
-        } catch (Exception ignored) {
+            overworld.setSpawnLocation(boxSpawn);
+        } catch (Throwable ignored) {
+            overworld.setSpawnLocation(boxSpawn.getBlockX(), boxSpawn.getBlockY(), boxSpawn.getBlockZ());
         }
+        dispatchConsoleCommandSafe("setworldspawn 0 " + boxSpawn.getBlockY() + " 0");
 
-        overworld.setSpawnLocation(boxSpawn.getBlockX(), boxSpawn.getBlockY(), boxSpawn.getBlockZ());
-        chosenStartLocation = boxSpawn;
-
-        PotionEffectType saturationType = resolvePotionEffect("SATURATION");
+        // 3. Телепортируем всех игроков в коробку, ставим им точку возрождения в коробке и выдаём эффект сытости
+        PotionEffectType saturationType = resolvePotionEffect("saturation", "SATURATION");
         for (Player p : Bukkit.getOnlinePlayers()) {
             p.setGameMode(GameMode.SURVIVAL);
+            p.setFallDistance(0f);
             p.teleport(boxSpawn);
-            p.setBedSpawnLocation(boxSpawn, true);
+            setPlayerRespawnPoint(p, boxSpawn);
             p.setFoodLevel(20);
             p.setSaturation(20f);
             if (saturationType != null) {
-                p.addPotionEffect(new PotionEffect(saturationType, Integer.MAX_VALUE, 0, false, false, false));
+                p.addPotionEffect(new PotionEffect(saturationType, 20 * 60 * 60 * 24, 255, false, false, false));
             }
         }
     }
 
     private void applyActiveGameWorldRules() {
-        PotionEffectType saturationType = resolvePotionEffect("SATURATION");
+        PotionEffectType saturationType = resolvePotionEffect("saturation", "SATURATION");
         for (Player p : Bukkit.getOnlinePlayers()) {
             if (saturationType != null) {
                 p.removePotionEffect(saturationType);
@@ -1090,24 +1138,40 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         }
 
         for (World w : Bukkit.getWorlds()) {
-            w.setPVP(true);
-            w.setGameRule(GameRule.DO_DAYLIGHT_CYCLE, true);
-            setLocatorBarRule(w, false);
+            try {
+                w.setPVP(true);
+            } catch (Throwable ignored) {
+            }
+        }
+        dispatchConsoleCommandSafe("gamerule doDaylightCycle true");
+        dispatchConsoleCommandSafe("gamerule locatorBar false");
+    }
+
+    @SuppressWarnings("deprecation")
+    private void setPlayerRespawnPoint(Player player, Location location) {
+        try {
+            Method setRespawn = player.getClass().getMethod("setRespawnLocation", Location.class, boolean.class);
+            setRespawn.invoke(player, location, true);
+            return;
+        } catch (Throwable ignored) {
         }
         try {
-            Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "gamerule locatorBar false");
-        } catch (Exception ignored) {
+            player.setBedSpawnLocation(location, true);
+        } catch (Throwable ignored) {
         }
     }
 
-    @SuppressWarnings({"unchecked", "rawtypes"})
-    private void setLocatorBarRule(World world, boolean enabled) {
+    private void dispatchConsoleCommandSafe(String commandLine) {
         try {
-            GameRule rule = GameRule.getByName("locatorBar");
-            if (rule != null && rule.getType() == Boolean.class) {
-                world.setGameRule(rule, enabled);
-            }
-        } catch (Exception ignored) {
+            Bukkit.dispatchCommand(Bukkit.getConsoleSender(), commandLine);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void playSoundSafe(Player player, String soundKey, float volume, float pitch) {
+        try {
+            player.playSound(player.getLocation(), soundKey, volume, pitch);
+        } catch (Throwable ignored) {
         }
     }
 
@@ -1139,7 +1203,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
             activeOverworld = getMainOverworld();
         }
 
-        // Строим коробку ожидания 20x20x20 из барьеров на (0, 250, 0) и переносим всех туда
+        // Строим коробку ожидания 20x20x20 из барьеров на (0, 250, 0), ставим там спавн и переносим всех игроков
         Location boxSpawn = buildWaitingBox(activeOverworld);
         applyPreparationWorldRules(activeOverworld, boxSpawn);
 
@@ -1147,7 +1211,8 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
 
         Bukkit.broadcastMessage(ChatColor.GOLD + "=============================================");
         Bukkit.broadcastMessage(ChatColor.GREEN + "Подготовка к Manhunt начата!");
-        Bukkit.broadcastMessage(ChatColor.AQUA + "Все игроки перенесены в комнату ожидания (ПВП и голод отключены).");
+        Bukkit.broadcastMessage(ChatColor.AQUA + "Все игроки перенесены в коробку ожидания (0, 250, 0).");
+        Bukkit.broadcastMessage(ChatColor.GRAY + "ПВП выключено, время 0, голод отключён, спавн установлен в коробке.");
         Bukkit.broadcastMessage(ChatColor.YELLOW + "Администратор должен назначить спидранера и охотников:");
         Bukkit.broadcastMessage(ChatColor.GRAY + "• /manhunt speedruner add <Игрок>");
         Bukkit.broadcastMessage(ChatColor.GRAY + "• /manhunt hunter add <Игрок>");
@@ -1192,9 +1257,12 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
 
         resetPlayerHealthAndMode(target);
         if (isPreparationStage()) {
-            PotionEffectType sat = resolvePotionEffect("SATURATION");
+            PotionEffectType sat = resolvePotionEffect("saturation", "SATURATION");
             if (sat != null) {
-                target.addPotionEffect(new PotionEffect(sat, Integer.MAX_VALUE, 0, false, false, false));
+                target.addPotionEffect(new PotionEffect(sat, 20 * 60 * 60 * 24, 255, false, false, false));
+            }
+            if (chosenStartLocation != null) {
+                target.teleport(chosenStartLocation);
             }
         }
         removePlayerFromScoreboardTeam(target);
@@ -1254,13 +1322,22 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         World overworld = getMainOverworld();
         int surfaceY = getHighestSurfaceYIgnoringBarriers(overworld, 0, 0) + 1;
         Location defaultSpawn = new Location(overworld, 0.5, surfaceY, 0.5);
-        overworld.setSpawnLocation(0, surfaceY, 0);
+        try {
+            overworld.setSpawnLocation(defaultSpawn);
+        } catch (Throwable ignored) {
+            overworld.setSpawnLocation(0, surfaceY, 0);
+        }
+        dispatchConsoleCommandSafe("setworldspawn 0 " + surfaceY + " 0");
 
         resetWorldBorder(overworld);
         for (World w : Bukkit.getWorlds()) {
-            w.setPVP(true);
-            w.setGameRule(GameRule.DO_DAYLIGHT_CYCLE, true);
+            try {
+                w.setPVP(true);
+            } catch (Throwable ignored) {
+            }
         }
+        dispatchConsoleCommandSafe("gamerule doDaylightCycle true");
+        dispatchConsoleCommandSafe("gamerule locatorBar true");
 
         for (Player p : Bukkit.getOnlinePlayers()) {
             p.setGlowing(false);
@@ -1271,7 +1348,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
             }
             setPlayerMaxHealth(p, 20.0);
             p.setGameMode(GameMode.SURVIVAL);
-            p.setBedSpawnLocation(defaultSpawn, true);
+            setPlayerRespawnPoint(p, defaultSpawn);
             p.setHealth(0.0);
             p.teleport(defaultSpawn);
         }
@@ -1306,11 +1383,11 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
 
         int highestY = getHighestSurfaceYIgnoringBarriers(overworld, 0, 0);
         Location centerLoc = new Location(overworld, 0.5, highestY + 10.0, 0.5);
-        speedrunner.teleport(centerLoc);
 
         speedrunner.setGameMode(GameMode.SPECTATOR);
         speedrunner.setAllowFlight(true);
         speedrunner.setFlying(true);
+        speedrunner.teleport(centerLoc);
 
         int zoneSize = (int) selectedDifficulty.getPickPlaceBorderSize();
         speedrunner.sendMessage(ChatColor.GREEN + "Вы переведены в режим Наблюдателя в зоне "
@@ -1332,13 +1409,21 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         int topY = getHighestSurfaceYIgnoringBarriers(world, blockX, blockZ) + 1;
 
         chosenStartLocation = new Location(world, exactX, topY, exactZ, runnerLoc.getYaw(), runnerLoc.getPitch());
-        world.setSpawnLocation(blockX, topY, blockZ);
 
-        PotionEffectType saturationType = resolvePotionEffect("SATURATION");
+        // Переносим мировой спавнпоинт из коробки ожидания на выбранную спидранером точку старта
+        try {
+            world.setSpawnLocation(chosenStartLocation);
+        } catch (Throwable ignored) {
+            world.setSpawnLocation(blockX, topY, blockZ);
+        }
+        dispatchConsoleCommandSafe("setworldspawn " + blockX + " " + topY + " " + blockZ);
+
+        PotionEffectType saturationType = resolvePotionEffect("saturation", "SATURATION");
 
         for (Player p : Bukkit.getOnlinePlayers()) {
+            p.setFallDistance(0f);
             p.teleport(chosenStartLocation);
-            p.setBedSpawnLocation(chosenStartLocation, true);
+            setPlayerRespawnPoint(p, chosenStartLocation);
             if (!p.getUniqueId().equals(speedrunnerUuid)) {
                 p.setGameMode(GameMode.SURVIVAL);
                 setPlayerMaxHealth(p, 20.0);
@@ -1346,7 +1431,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
                 p.setFoodLevel(20);
             }
             if (saturationType != null) {
-                p.addPotionEffect(new PotionEffect(saturationType, Integer.MAX_VALUE, 0, false, false, false));
+                p.addPotionEffect(new PotionEffect(saturationType, 20 * 60 * 60 * 24, 255, false, false, false));
             }
         }
 
@@ -1419,7 +1504,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
                     for (Player p : Bukkit.getOnlinePlayers()) {
                         p.sendTitle(color + String.valueOf(secondsLeft),
                                 ChatColor.YELLOW + "Приготовьтесь к старту!", 0, 25, 5);
-                        p.playSound(p.getLocation(), Sound.BLOCK_NOTE_BLOCK_PLING, 1.0f, 1.0f);
+                        playSoundSafe(p, SOUND_NOTE_PLING, 1.0f, 1.0f);
                     }
                     secondsLeft--;
                 } else {
@@ -1455,7 +1540,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         for (Player p : Bukkit.getOnlinePlayers()) {
             p.setGlowing(false);
             p.sendTitle(ChatColor.GREEN + "ИГРА НАЧАЛАСЬ!", ChatColor.YELLOW + "Удачи!", 5, 40, 10);
-            p.playSound(p.getLocation(), Sound.BLOCK_NOTE_BLOCK_PLING, 1.0f, 2.0f);
+            playSoundSafe(p, SOUND_NOTE_PLING, 1.0f, 2.0f);
         }
         readyPlayers.clear();
 
@@ -1498,9 +1583,9 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         trackedRunnerEffects.clear();
         int hunterCount = Math.max(1, hunterUuids.size());
 
-        PotionEffectType speedType = resolvePotionEffect("SPEED");
-        PotionEffectType strengthType = resolvePotionEffect("STRENGTH", "INCREASE_DAMAGE");
-        PotionEffectType regenType = resolvePotionEffect("REGENERATION");
+        PotionEffectType speedType = resolvePotionEffect("speed", "SPEED");
+        PotionEffectType strengthType = resolvePotionEffect("strength", "STRENGTH", "INCREASE_DAMAGE");
+        PotionEffectType regenType = resolvePotionEffect("regeneration", "REGENERATION");
 
         List<PotionEffect> effectsToAdd = new ArrayList<>();
 
@@ -1548,9 +1633,20 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     @SuppressWarnings("deprecation")
     private PotionEffectType resolvePotionEffect(String... names) {
         for (String name : names) {
-            PotionEffectType byName = PotionEffectType.getByName(name);
-            if (byName != null) {
-                return byName;
+            try {
+                PotionEffectType byKey = Registry.EFFECT.get(NamespacedKey.minecraft(name.toLowerCase(Locale.ROOT)));
+                if (byKey != null) return byKey;
+            } catch (Throwable ignored) {
+            }
+            try {
+                PotionEffectType byKey = PotionEffectType.getByKey(NamespacedKey.minecraft(name.toLowerCase(Locale.ROOT)));
+                if (byKey != null) return byKey;
+            } catch (Throwable ignored) {
+            }
+            try {
+                PotionEffectType byName = PotionEffectType.getByName(name);
+                if (byName != null) return byName;
+            } catch (Throwable ignored) {
             }
         }
         return null;
@@ -1631,11 +1727,19 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
 
     @SuppressWarnings("deprecation")
     private String formatEffectName(PotionEffectType type) {
-        String name = type.getName().toUpperCase(Locale.ROOT);
+        String name = "";
+        try {
+            name = type.getKey().getKey().toUpperCase(Locale.ROOT);
+        } catch (Throwable ignored) {
+            try {
+                name = type.getName().toUpperCase(Locale.ROOT);
+            } catch (Throwable ignored2) {
+            }
+        }
         if (name.contains("SPEED")) return "Скорость";
         if (name.contains("DAMAGE") || name.contains("STRENGTH")) return "Сила";
         if (name.contains("REGENERATION")) return "Регенерация";
-        return type.getName();
+        return name.isEmpty() ? "Эффект" : name;
     }
 
     // =========================================================================
@@ -1760,10 +1864,10 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         }
         if (isPreparationStage() && chosenStartLocation != null) {
             p.teleport(chosenStartLocation);
-            p.setBedSpawnLocation(chosenStartLocation, true);
-            PotionEffectType sat = resolvePotionEffect("SATURATION");
+            setPlayerRespawnPoint(p, chosenStartLocation);
+            PotionEffectType sat = resolvePotionEffect("saturation", "SATURATION");
             if (sat != null) {
-                p.addPotionEffect(new PotionEffect(sat, Integer.MAX_VALUE, 0, false, false, false));
+                p.addPotionEffect(new PotionEffect(sat, 20 * 60 * 60 * 24, 255, false, false, false));
             }
         }
     }
@@ -1824,7 +1928,10 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     public void onPlayerRespawn(PlayerRespawnEvent event) {
         Player player = event.getPlayer();
 
-        if (!event.isBedSpawn() && !event.isAnchorSpawn() && chosenStartLocation != null) {
+        // На этапе подготовки всегда возрождаем в коробке ожидания (или на выбранном спавне, если нет кровати)
+        if (isPreparationStage() && chosenStartLocation != null) {
+            event.setRespawnLocation(chosenStartLocation);
+        } else if (!event.isBedSpawn() && !event.isAnchorSpawn() && chosenStartLocation != null) {
             event.setRespawnLocation(chosenStartLocation);
         }
 
@@ -1833,9 +1940,9 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         }
         if (isPreparationStage()) {
             Bukkit.getScheduler().runTaskLater(this, () -> {
-                PotionEffectType sat = resolvePotionEffect("SATURATION");
+                PotionEffectType sat = resolvePotionEffect("saturation", "SATURATION");
                 if (sat != null) {
-                    player.addPotionEffect(new PotionEffect(sat, Integer.MAX_VALUE, 0, false, false, false));
+                    player.addPotionEffect(new PotionEffect(sat, 20 * 60 * 60 * 24, 255, false, false, false));
                 }
             }, 1L);
         }
@@ -1907,7 +2014,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
             p.setGlowing(false);
             p.setGameMode(GameMode.SPECTATOR);
             p.sendTitle(ChatColor.BLUE + "Hunters Wins!!", ChatColor.YELLOW + "Спидранер погиб!", 10, 100, 20);
-            p.playSound(p.getLocation(), Sound.UI_TOAST_CHALLENGE_COMPLETE, 1.0f, 1.0f);
+            playSoundSafe(p, SOUND_CHALLENGE_COMPLETE, 1.0f, 1.0f);
         }
     }
 
@@ -1927,7 +2034,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
             p.setGlowing(false);
             p.setGameMode(GameMode.SPECTATOR);
             p.sendTitle(ChatColor.RED + "Speedrunner Wins!!", ChatColor.GOLD + "Освободите Энд!", 10, 100, 20);
-            p.playSound(p.getLocation(), Sound.UI_TOAST_CHALLENGE_COMPLETE, 1.0f, 1.0f);
+            playSoundSafe(p, SOUND_CHALLENGE_COMPLETE, 1.0f, 1.0f);
         }
     }
 
@@ -1981,61 +2088,88 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     }
 
     private void assignPlayerToTeam(Player player, String teamName, ChatColor color) {
-        Scoreboard board = Bukkit.getScoreboardManager() != null
-                ? Bukkit.getScoreboardManager().getMainScoreboard()
-                : null;
-        if (board != null) {
-            Team team = board.getTeam(teamName);
-            if (team != null) {
-                team.addEntry(player.getName());
+        try {
+            Scoreboard board = Bukkit.getScoreboardManager() != null
+                    ? Bukkit.getScoreboardManager().getMainScoreboard()
+                    : null;
+            if (board != null) {
+                Team team = board.getTeam(teamName);
+                if (team != null) {
+                    team.addEntry(player.getName());
+                }
             }
+        } catch (Throwable ignored) {
         }
         player.setDisplayName(color + player.getName() + ChatColor.RESET);
         player.setPlayerListName(color + player.getName());
     }
 
     private void removePlayerFromScoreboardTeam(Player player) {
-        Scoreboard board = Bukkit.getScoreboardManager() != null
-                ? Bukkit.getScoreboardManager().getMainScoreboard()
-                : null;
-        if (board != null) {
-            for (Team team : board.getTeams()) {
-                if (team.hasEntry(player.getName())) {
-                    team.removeEntry(player.getName());
+        try {
+            Scoreboard board = Bukkit.getScoreboardManager() != null
+                    ? Bukkit.getScoreboardManager().getMainScoreboard()
+                    : null;
+            if (board != null) {
+                for (Team team : board.getTeams()) {
+                    if (team.hasEntry(player.getName())) {
+                        team.removeEntry(player.getName());
+                    }
                 }
             }
+        } catch (Throwable ignored) {
         }
         player.setDisplayName(player.getName());
         player.setPlayerListName(player.getName());
     }
 
+    /**
+     * Безопасная установка максимального здоровья для любых версий (включая 1.21.3+ и 26.3,
+     * где org.bukkit.attribute.Attribute был переделан из enum в интерфейс).
+     */
+    @SuppressWarnings("deprecation")
     private void setPlayerMaxHealth(Player player, double maxHealth) {
-        Attribute maxHealthAttr = null;
-        for (Attribute attr : Attribute.values()) {
-            if (attr.name().equals("GENERIC_MAX_HEALTH") || attr.name().equals("MAX_HEALTH")) {
-                maxHealthAttr = attr;
-                break;
+        try {
+            Object attr = null;
+            try {
+                attr = Registry.ATTRIBUTE.get(NamespacedKey.minecraft("max_health"));
+            } catch (Throwable ignored) {
             }
+            if (attr == null) {
+                try {
+                    attr = Registry.ATTRIBUTE.get(NamespacedKey.minecraft("generic.max_health"));
+                } catch (Throwable ignored) {
+                }
+            }
+            if (attr != null) {
+                Method getAttr = player.getClass().getMethod("getAttribute", Class.forName("org.bukkit.attribute.Attribute"));
+                AttributeInstance instance = (AttributeInstance) getAttr.invoke(player, attr);
+                if (instance != null) {
+                    instance.setBaseValue(maxHealth);
+                    return;
+                }
+            }
+        } catch (Throwable ignored) {
         }
-        if (maxHealthAttr != null) {
-            AttributeInstance instance = player.getAttribute(maxHealthAttr);
-            if (instance != null) {
-                instance.setBaseValue(maxHealth);
-            }
+        try {
+            player.setMaxHealth(maxHealth);
+        } catch (Throwable ignored) {
         }
     }
 
     private void resetPlayerHealthAndMode(Player player) {
-        player.setGlowing(false);
-        player.setWalkSpeed(0.2f);
-        player.setFlySpeed(0.1f);
-        setPlayerMaxHealth(player, 20.0);
-        if (player.getHealth() > 20.0) {
-            player.setHealth(20.0);
-        }
-        player.setGameMode(GameMode.SURVIVAL);
-        for (PotionEffect effect : player.getActivePotionEffects()) {
-            player.removePotionEffect(effect.getType());
+        try {
+            player.setGlowing(false);
+            player.setWalkSpeed(0.2f);
+            player.setFlySpeed(0.1f);
+            setPlayerMaxHealth(player, 20.0);
+            if (player.getHealth() > 20.0) {
+                player.setHealth(20.0);
+            }
+            player.setGameMode(GameMode.SURVIVAL);
+            for (PotionEffect effect : new ArrayList<>(player.getActivePotionEffects())) {
+                player.removePotionEffect(effect.getType());
+            }
+        } catch (Throwable ignored) {
         }
     }
 
@@ -2067,17 +2201,24 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         if (resetWorldBorders) {
             resetWorldBorder(getMainOverworld());
             for (World w : Bukkit.getWorlds()) {
-                w.setPVP(true);
-                w.setGameRule(GameRule.DO_DAYLIGHT_CYCLE, true);
+                try {
+                    w.setPVP(true);
+                } catch (Throwable ignored) {
+                }
             }
+            dispatchConsoleCommandSafe("gamerule doDaylightCycle true");
+            dispatchConsoleCommandSafe("gamerule locatorBar true");
         }
     }
 
     private void resetWorldBorder(World world) {
         if (world == null) return;
-        WorldBorder border = world.getWorldBorder();
-        border.setCenter(0.0, 0.0);
-        border.setSize(DEFAULT_MINECRAFT_BORDER);
+        try {
+            WorldBorder border = world.getWorldBorder();
+            border.setCenter(0.0, 0.0);
+            border.setSize(DEFAULT_MINECRAFT_BORDER);
+        } catch (Throwable ignored) {
+        }
     }
 
     private World getMainOverworld() {
@@ -2124,7 +2265,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     }
 
     private void sendFullModInfo(CommandSender sender) {
-        sender.sendMessage(ChatColor.GOLD + "========== Информация о моде Asonsss_manhunt (v1.3.0) ==========");
+        sender.sendMessage(ChatColor.GOLD + "========== Информация о моде Asonsss_manhunt (v1.3.1) ==========");
         sender.sendMessage(ChatColor.AQUA + "Команды администратора:");
         sender.sendMessage(ChatColor.YELLOW + " • /manhunt game start_prepare " + ChatColor.GRAY + "— запустить подготовку, создать комнату ожидания и включить Scoreboard");
         sender.sendMessage(ChatColor.YELLOW + " • /manhunt speedruner add/remove <Игрок> " + ChatColor.GRAY + "— назначить или удалить спидранера");
@@ -2151,7 +2292,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     }
 
     private void sendManhuntHelp(CommandSender sender) {
-        sender.sendMessage(ChatColor.GOLD + "=== Команды Asonsss_manhunt (v1.3.0) ===");
+        sender.sendMessage(ChatColor.GOLD + "=== Команды Asonsss_manhunt (v1.3.1) ===");
         sender.sendMessage(ChatColor.YELLOW + "/manhunt info " + ChatColor.GRAY + "— полное описание всех команд мода");
         sender.sendMessage(ChatColor.YELLOW + "/manhunt difficulty info " + ChatColor.GRAY + "— информация о сложностях");
         sender.sendMessage(ChatColor.YELLOW + "/manhunt game start_prepare " + ChatColor.GRAY + "— начать подготовку к игре");
