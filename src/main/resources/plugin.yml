@@ -1,12 +1,13 @@
 name: Asonsss_manhunt
-version: '26.3'
+version: '1.2.0'
 main: me.asonsss.manhunt.AsonsssManhunt
 api-version: '1.21'
-description: Manhunt plugin with difficulty modes, spawn picker, ready aura and dimensional compass
+description: Manhunt plugin with difficulty modes, spawn picker, pause bossbar, scoreboard and dimensional compass
 commands:
   manhunt:
     description: Основная команда управления Manhunt
-    usage: /manhunt <game|speedruner|hunter|difficulty> ...
+    aliases: [speedrun]
+    usage: /manhunt <game|speedruner|hunter|difficulty|info> ...
   sp:
     description: Команды спидранера для настройки сложности и выбора места старта
     usage: /sp <difficulty|pickplace> ...
@@ -19,3 +20,7 @@ commands:
   fortrest:
     description: Найти ближайшую крепость Незера (только для спидранера на сложности Easy)
     usage: /fortrest
+  pause:
+    description: Поставить игру на паузу (до 180 секунд)
+    aliases: [p]
+    usage: /pause <секунды>

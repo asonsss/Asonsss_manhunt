@@ -14,6 +14,9 @@ import org.bukkit.WorldCreator;
 import org.bukkit.WorldType;
 import org.bukkit.attribute.Attribute;
 import org.bukkit.attribute.AttributeInstance;
+import org.bukkit.boss.BarColor;
+import org.bukkit.boss.BarStyle;
+import org.bukkit.boss.BossBar;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
 import org.bukkit.command.CommandSender;
@@ -24,12 +27,18 @@ import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
+import org.bukkit.event.block.BlockBreakEvent;
+import org.bukkit.event.block.BlockPlaceEvent;
+import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.event.entity.EntityDeathEvent;
 import org.bukkit.event.entity.EntityPotionEffectEvent;
+import org.bukkit.event.entity.FoodLevelChangeEvent;
 import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.player.PlayerAdvancementDoneEvent;
 import org.bukkit.event.player.PlayerChangedWorldEvent;
 import org.bukkit.event.player.PlayerDropItemEvent;
+import org.bukkit.event.player.PlayerInteractEvent;
+import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerMoveEvent;
 import org.bukkit.event.player.PlayerPortalEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
@@ -42,13 +51,17 @@ import org.bukkit.potion.PotionEffect;
 import org.bukkit.potion.PotionEffectType;
 import org.bukkit.scheduler.BukkitRunnable;
 import org.bukkit.scheduler.BukkitTask;
+import org.bukkit.scoreboard.DisplaySlot;
+import org.bukkit.scoreboard.Objective;
 import org.bukkit.scoreboard.Scoreboard;
 import org.bukkit.scoreboard.Team;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.EnumMap;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
@@ -59,18 +72,19 @@ import java.util.UUID;
 import java.util.stream.Collectors;
 
 /**
- * Полный исходный код плагина: Asonsss_manhunt (Версия 26.3)
+ * Полный исходный код плагина: Asonsss_manhunt (Версия 1.2.0)
  *
  * ======================== 1. ФАЙЛ src/main/resources/plugin.yml ========================
  * name: Asonsss_manhunt
- * version: '26.3'
+ * version: '1.2.0'
  * main: me.asonsss.manhunt.AsonsssManhunt
  * api-version: '1.21'
- * description: Manhunt plugin with difficulty modes, spawn picker, ready aura and dimensional compass
+ * description: Manhunt plugin with difficulty modes, spawn picker, pause bossbar, scoreboard and dimensional compass
  * commands:
  *   manhunt:
  *     description: Основная команда управления Manhunt
- *     usage: /manhunt <game|speedruner|hunter|difficulty> ...
+ *     aliases: [speedrun]
+ *     usage: /manhunt <game|speedruner|hunter|difficulty|info> ...
  *   sp:
  *     description: Команды спидранера для настройки сложности и выбора места старта
  *     usage: /sp <difficulty|pickplace> ...
@@ -83,6 +97,10 @@ import java.util.stream.Collectors;
  *   fortrest:
  *     description: Найти ближайшую крепость Незера (только для спидранера на сложности Easy)
  *     usage: /fortrest
+ *   pause:
+ *     description: Поставить игру на паузу (до 180 секунд)
+ *     aliases: [p]
+ *     usage: /pause <секунды>
  *
  * ======================== 2. ФАЙЛ pom.xml (для сборки через Maven) ========================
  * <project xmlns="http://maven.apache.org/POM/4.0.0"
@@ -91,7 +109,7 @@ import java.util.stream.Collectors;
  *     <modelVersion>4.0.0</modelVersion>
  *     <groupId>me.asonsss</groupId>
  *     <artifactId>Asonsss_manhunt</artifactId>
- *     <version>26.3</version>
+ *     <version>1.2.0</version>
  *     <packaging>jar</packaging>
  *     <properties>
  *         <maven.compiler.source>21</maven.compiler.source>
@@ -181,8 +199,11 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
 
     private static final String TEAM_SPEEDRUNNER = "mh_speedrunner";
     private static final String TEAM_HUNTERS = "mh_hunters";
+    private static final String OBJECTIVE_SIDEBAR = "mh_sidebar";
     private static final double PRE_GAME_BORDER_SIZE = 30.0;
     private static final long IMPOSSIBLE_SHRINK_SECONDS = 4L * 60L * 60L; // 4 часа = 14400 секунд
+    private static final int MAX_PAUSE_SECONDS = 180;
+    private static final long PAUSE_COOLDOWN_MILLIS = 10L * 60L * 1000L; // 10 минут
 
     private GameState gameState = GameState.IDLE;
     private DifficultyMode selectedDifficulty = null;
@@ -198,6 +219,19 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     private Location chosenStartLocation = null;
     private BukkitTask countdownTask = null;
     private BukkitTask gameLoopTask = null;
+    private BukkitTask scoreboardAndTimerTask = null;
+
+    // Таймер игры / обратного отсчёта IMPOSSIBLE (в секундах)
+    private long elapsedGameSeconds = 0L;
+    private boolean scoreboardActive = false;
+
+    // Переменные системы паузы (/pause, /p)
+    private boolean prePauseActive = false;
+    private boolean gamePaused = false;
+    private long pauseCooldownEndMillis = 0L;
+    private BukkitTask pauseTask = null;
+    private BossBar pauseBossBar = null;
+    private final Map<UUID, Collection<PotionEffect>> savedEffectsDuringPause = new HashMap<>();
 
     private NamespacedKey compassKey;
 
@@ -212,20 +246,28 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         registerCommand("ready");
         registerCommand("unready");
         registerCommand("fortrest");
+        registerCommand("pause");
 
         setupScoreboardTeams();
         startCompassAndEffectTask();
+        startScoreboardAndTimerTask();
 
-        getLogger().info("Asonsss_manhunt v26.3 успешно запущен!");
+        getLogger().info("Asonsss_manhunt v1.2.0 успешно запущен!");
     }
 
     @Override
     public void onDisable() {
         cancelCountdown();
+        stopPauseImmediately(false);
         if (gameLoopTask != null) {
             gameLoopTask.cancel();
             gameLoopTask = null;
         }
+        if (scoreboardAndTimerTask != null) {
+            scoreboardAndTimerTask.cancel();
+            scoreboardAndTimerTask = null;
+        }
+        clearSidebarScoreboard();
         resetAllPlayerStates();
     }
 
@@ -277,6 +319,8 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
                 return handleReadyCommand(sender, false);
             case "fortrest":
                 return handleFortrestCommand(sender);
+            case "pause":
+                return handlePauseCommand(sender, args);
             default:
                 return false;
         }
@@ -289,6 +333,12 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         }
 
         String sub = args[0].toLowerCase(Locale.ROOT);
+
+        // /manhunt info — показывает все команды мода и что они делают (доступна всем)
+        if (sub.equals("info")) {
+            sendFullModInfo(sender);
+            return true;
+        }
 
         // /manhunt difficulty info — доступна любому игроку в любое время
         if (sub.equals("difficulty")) {
@@ -426,6 +476,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
 
             selectedDifficulty = mode;
             gameState = GameState.DIFFICULTY_SELECTED;
+            updateSidebarScoreboard();
 
             Bukkit.broadcastMessage(ChatColor.GOLD + "[Manhunt] " + ChatColor.RED + player.getName()
                     + ChatColor.YELLOW + " выбрал сложность: " + ChatColor.AQUA + mode.getDisplayName());
@@ -525,7 +576,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         World world = player.getWorld();
         Location origin = player.getLocation();
 
-        // Если спидранер находится в Верхнем мире, пересчитываем его координаты для Незера (1:8)
         if (world.getEnvironment() != World.Environment.NETHER) {
             World nether = getNetherWorld();
             if (nether != null) {
@@ -548,6 +598,334 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     }
 
     // =========================================================================
+    // НОВАЯ МЕХАНИКА ПАУЗЫ (/pause и /p)
+    // =========================================================================
+
+    private boolean handlePauseCommand(CommandSender sender, String[] args) {
+        if (!(sender instanceof Player)) {
+            sender.sendMessage(ChatColor.RED + "Команду /pause может использовать только игрок.");
+            return true;
+        }
+        Player player = (Player) sender;
+
+        if (gameState != GameState.IN_GAME) {
+            player.sendMessage(ChatColor.RED + "Команду /pause можно использовать только во время активной игры!");
+            return true;
+        }
+
+        if (prePauseActive || gamePaused) {
+            player.sendMessage(ChatColor.RED + "Пауза уже активна или готовится к запуску!");
+            return true;
+        }
+
+        long now = System.currentTimeMillis();
+        if (now < pauseCooldownEndMillis) {
+            long remainingSeconds = Math.max(1L, (pauseCooldownEndMillis - now + 999L) / 1000L);
+            player.sendMessage(ChatColor.RED + "Команда станет снова доступна через " + formatCooldownTime(remainingSeconds) + ".");
+            return true;
+        }
+
+        if (args.length < 1) {
+            player.sendMessage(ChatColor.RED + "Использование: /pause <время в секундах (максимум 180)>");
+            return true;
+        }
+
+        int pauseDuration;
+        try {
+            pauseDuration = Integer.parseInt(args[0]);
+        } catch (NumberFormatException e) {
+            player.sendMessage(ChatColor.RED + "Укажите корректное число секунд (от 1 до 180)!");
+            return true;
+        }
+
+        if (pauseDuration <= 0 || pauseDuration > MAX_PAUSE_SECONDS) {
+            player.sendMessage(ChatColor.RED + "Время паузы должно быть от 1 до " + MAX_PAUSE_SECONDS + " секунд!");
+            return true;
+        }
+
+        startPauseSequence(player.getName(), pauseDuration);
+        return true;
+    }
+
+    private void startPauseSequence(String initiatorName, int pauseSeconds) {
+        stopPauseImmediately(false);
+        prePauseActive = true;
+
+        pauseBossBar = Bukkit.createBossBar(
+                ChatColor.YELLOW + "Через 10 сек. игра будет заморожена на " + pauseSeconds + " сек.",
+                BarColor.YELLOW,
+                BarStyle.SOLID
+        );
+        pauseBossBar.setProgress(1.0);
+        for (Player p : Bukkit.getOnlinePlayers()) {
+            pauseBossBar.addPlayer(p);
+        }
+
+        Bukkit.broadcastMessage(ChatColor.GOLD + "[Manhunt] " + ChatColor.AQUA + initiatorName
+                + ChatColor.YELLOW + " запросил паузу на " + ChatColor.GREEN + pauseSeconds + " сек."
+                + ChatColor.YELLOW + " Заморозка через 10 секунд!");
+
+        pauseTask = new BukkitRunnable() {
+            int preCountdown = 10;
+            int remainingPause = pauseSeconds;
+            boolean inFreezePhase = false;
+
+            @Override
+            public void run() {
+                if (gameState != GameState.IN_GAME) {
+                    stopPauseImmediately(true);
+                    return;
+                }
+
+                if (!inFreezePhase) {
+                    if (preCountdown > 0) {
+                        if (pauseBossBar != null) {
+                            pauseBossBar.setTitle(ChatColor.YELLOW + "Через " + preCountdown
+                                    + " сек. игра будет заморожена на " + pauseSeconds + " сек.");
+                            pauseBossBar.setProgress(Math.max(0.0, Math.min(1.0, preCountdown / 10.0)));
+                        }
+                        for (Player p : Bukkit.getOnlinePlayers()) {
+                            p.playSound(p.getLocation(), Sound.BLOCK_NOTE_BLOCK_PLING, 1.0f, 2.0f);
+                        }
+                        preCountdown--;
+                        return;
+                    }
+
+                    // Переход к самой паузе после 10 секунд
+                    inFreezePhase = true;
+                    prePauseActive = false;
+                    gamePaused = true;
+                    applyFreezeState(pauseSeconds);
+                }
+
+                // Фаза активной заморозки
+                if (remainingPause > 0) {
+                    if (pauseBossBar != null) {
+                        pauseBossBar.setColor(BarColor.BLUE);
+                        pauseBossBar.setTitle(ChatColor.AQUA + initiatorName + ChatColor.WHITE
+                                + " начал перерыв. Окончание через " + ChatColor.YELLOW + remainingPause + " сек.");
+                        pauseBossBar.setProgress(Math.max(0.0, Math.min(1.0, remainingPause / (double) pauseSeconds)));
+                    }
+
+                    if (remainingPause <= 5) {
+                        for (Player p : Bukkit.getOnlinePlayers()) {
+                            p.sendTitle(ChatColor.AQUA + String.valueOf(remainingPause),
+                                    ChatColor.YELLOW + "До возобновления игры...", 0, 25, 5);
+                            p.playSound(p.getLocation(), Sound.BLOCK_NOTE_BLOCK_PLING, 1.0f, 1.5f);
+                        }
+                    }
+
+                    remainingPause--;
+                } else {
+                    // Окончание паузы
+                    finishPauseNormally();
+                }
+            }
+        }.runTaskTimer(this, 0L, 20L);
+    }
+
+    private void applyFreezeState(int pauseSeconds) {
+        // Замораживаем игровой мир командой tick freeze
+        Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "tick freeze");
+
+        // Приостанавливаем сужение границы мира в режиме IMPOSSIBLE
+        if (selectedDifficulty == DifficultyMode.IMPOSSIBLE) {
+            World world = getMainOverworld();
+            if (world != null) {
+                WorldBorder border = world.getWorldBorder();
+                border.setSize(border.getSize()); // фиксируем текущий размер на время паузы
+            }
+        }
+
+        // Сохраняем текущие зелья игроков (чтобы время баффов спидранера не сгорало во время паузы) и накладываем эффекты остановки
+        savedEffectsDuringPause.clear();
+        PotionEffectType slowType = resolvePotionEffect("SLOWNESS", "SLOW");
+        int ticks = (pauseSeconds + 5) * 20;
+
+        for (Player p : Bukkit.getOnlinePlayers()) {
+            List<PotionEffect> copy = new ArrayList<>(p.getActivePotionEffects());
+            savedEffectsDuringPause.put(p.getUniqueId(), copy);
+            for (PotionEffect eff : copy) {
+                p.removePotionEffect(eff.getType());
+            }
+            if (slowType != null) {
+                p.addPotionEffect(new PotionEffect(slowType, ticks, 250, false, false, false));
+            }
+            p.setWalkSpeed(0.0f);
+            p.setFlySpeed(0.0f);
+        }
+    }
+
+    private void finishPauseNormally() {
+        stopPauseImmediately(true);
+        pauseCooldownEndMillis = System.currentTimeMillis() + PAUSE_COOLDOWN_MILLIS;
+
+        // Возобновляем сужение границы мира в режиме IMPOSSIBLE с оставшегося времени
+        if (gameState == GameState.IN_GAME && selectedDifficulty == DifficultyMode.IMPOSSIBLE) {
+            World world = getMainOverworld();
+            if (world != null) {
+                long remainingShrinkSeconds = Math.max(1L, IMPOSSIBLE_SHRINK_SECONDS - elapsedGameSeconds);
+                world.getWorldBorder().setSize(1.0, remainingShrinkSeconds);
+            }
+        }
+
+        Bukkit.broadcastMessage(ChatColor.GOLD + "[Manhunt] " + ChatColor.GREEN
+                + "Пауза окончена! Игра продолжается. Следующая пауза будет доступна через 10 минут.");
+        for (Player p : Bukkit.getOnlinePlayers()) {
+            p.sendTitle(ChatColor.GREEN + "Игра продолжается!", "", 5, 30, 10);
+            p.playSound(p.getLocation(), Sound.ENTITY_PLAYER_LEVELUP, 1.0f, 1.2f);
+        }
+    }
+
+    private void stopPauseImmediately(boolean unfreezeWorld) {
+        if (pauseTask != null) {
+            pauseTask.cancel();
+            pauseTask = null;
+        }
+        if (pauseBossBar != null) {
+            pauseBossBar.removeAll();
+            pauseBossBar = null;
+        }
+
+        boolean wasPaused = gamePaused;
+        prePauseActive = false;
+        gamePaused = false;
+
+        if (wasPaused || unfreezeWorld) {
+            try {
+                Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "tick unfreeze");
+            } catch (Exception ignored) {
+            }
+
+            PotionEffectType slowType = resolvePotionEffect("SLOWNESS", "SLOW");
+            for (Player p : Bukkit.getOnlinePlayers()) {
+                p.setWalkSpeed(0.2f);
+                p.setFlySpeed(0.1f);
+                if (slowType != null) {
+                    p.removePotionEffect(slowType);
+                }
+                Collection<PotionEffect> saved = savedEffectsDuringPause.get(p.getUniqueId());
+                if (saved != null) {
+                    for (PotionEffect eff : saved) {
+                        p.addPotionEffect(eff);
+                    }
+                }
+            }
+            savedEffectsDuringPause.clear();
+        }
+    }
+
+    private String formatCooldownTime(long totalSeconds) {
+        long minutes = totalSeconds / 60L;
+        long seconds = totalSeconds % 60L;
+        if (minutes > 0) {
+            return minutes + " мин. " + seconds + " сек";
+        }
+        return seconds + " сек";
+    }
+
+    // =========================================================================
+    // SCOREBOARD СПРАВА И ТАЙМЕР ИГРЫ
+    // =========================================================================
+
+    private void startScoreboardAndTimerTask() {
+        scoreboardAndTimerTask = new BukkitRunnable() {
+            @Override
+            public void run() {
+                if (gameState == GameState.IN_GAME && !gamePaused) {
+                    elapsedGameSeconds++;
+                }
+                if (scoreboardActive) {
+                    updateSidebarScoreboard();
+                }
+            }
+        }.runTaskTimer(this, 20L, 20L);
+    }
+
+    private void updateSidebarScoreboard() {
+        if (!scoreboardActive || Bukkit.getScoreboardManager() == null) return;
+        Scoreboard board = Bukkit.getScoreboardManager().getMainScoreboard();
+
+        Objective oldObj = board.getObjective(OBJECTIVE_SIDEBAR);
+        if (oldObj != null) {
+            oldObj.unregister();
+        }
+
+        Objective obj = board.registerNewObjective(
+                OBJECTIVE_SIDEBAR,
+                "dummy",
+                ChatColor.GOLD + "" + ChatColor.BOLD + "✦ "
+                        + ChatColor.RED + ChatColor.BOLD + "ᴀꜱᴏɴꜱꜱꜱ "
+                        + ChatColor.BLUE + ChatColor.BOLD + "ᴍᴀɴʜᴜɴᴛ"
+                        + ChatColor.GOLD + ChatColor.BOLD + " ✦"
+        );
+        obj.setDisplaySlot(DisplaySlot.SIDEBAR);
+
+        String diffText = selectedDifficulty != null
+                ? ChatColor.AQUA + selectedDifficulty.getDisplayName()
+                : ChatColor.GRAY + "Не выбран";
+
+        String runnerName = "Не выбран";
+        if (speedrunnerUuid != null) {
+            Player sr = Bukkit.getPlayer(speedrunnerUuid);
+            if (sr != null) {
+                runnerName = sr.getName();
+            } else {
+                runnerName = Bukkit.getOfflinePlayer(speedrunnerUuid).getName();
+                if (runnerName == null) runnerName = "Выбран";
+            }
+        }
+
+        String timerLabel;
+        String timerValue;
+        if (selectedDifficulty == DifficultyMode.IMPOSSIBLE) {
+            long remaining = Math.max(0L, IMPOSSIBLE_SHRINK_SECONDS - elapsedGameSeconds);
+            timerLabel = ChatColor.LIGHT_PURPLE + "Сужение мира: ";
+            timerValue = ChatColor.RED + formatHhMmSs(remaining);
+        } else {
+            timerLabel = ChatColor.YELLOW + "Время: ";
+            timerValue = ChatColor.GREEN + formatHhMmSs(elapsedGameSeconds);
+        }
+
+        List<String> lines = Arrays.asList(
+                ChatColor.WHITE + "Сложность: " + diffText,
+                ChatColor.DARK_GRAY + "====================",
+                ChatColor.WHITE + "Спидранер: " + ChatColor.RED + runnerName,
+                ChatColor.WHITE + "Охотники: " + ChatColor.BLUE + hunterUuids.size(),
+                ChatColor.DARK_GRAY + "====================§r",
+                timerLabel + timerValue,
+                ChatColor.DARK_GRAY + "====================§7",
+                ChatColor.GOLD + "/manhunt info - инфо о моде"
+        );
+
+        int score = lines.size();
+        for (String line : lines) {
+            obj.getScore(line).setScore(score--);
+        }
+
+        for (Player p : Bukkit.getOnlinePlayers()) {
+            p.setScoreboard(board);
+        }
+    }
+
+    private void clearSidebarScoreboard() {
+        scoreboardActive = false;
+        if (Bukkit.getScoreboardManager() == null) return;
+        Scoreboard board = Bukkit.getScoreboardManager().getMainScoreboard();
+        Objective obj = board.getObjective(OBJECTIVE_SIDEBAR);
+        if (obj != null) {
+            obj.unregister();
+        }
+    }
+
+    private String formatHhMmSs(long totalSeconds) {
+        long hours = totalSeconds / 3600L;
+        long minutes = (totalSeconds % 3600L) / 60L;
+        long seconds = totalSeconds % 60L;
+        return String.format(Locale.ROOT, "%02d:%02d:%02d", hours, minutes, seconds);
+    }
+
+    // =========================================================================
     // ЭТАП 1: УПРАВЛЕНИЕ ПОДГОТОВКОЙ И РОЛЯМИ
     // =========================================================================
 
@@ -561,6 +939,8 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     private void startPreparePhase(CommandSender sender, boolean createNewWorld) {
         resetInternalState(false);
         gameState = GameState.PREPARE;
+        elapsedGameSeconds = 0L;
+        scoreboardActive = true;
 
         if (createNewWorld) {
             String worldName = "manhunt_world_" + (System.currentTimeMillis() / 1000L);
@@ -572,6 +952,8 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         } else {
             activeOverworld = getMainOverworld();
         }
+
+        updateSidebarScoreboard();
 
         Bukkit.broadcastMessage(ChatColor.GOLD + "=============================================");
         Bukkit.broadcastMessage(ChatColor.GREEN + "Подготовка к Manhunt начата!");
@@ -596,6 +978,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
 
         speedrunnerUuid = target.getUniqueId();
         assignPlayerToTeam(target, TEAM_SPEEDRUNNER, ChatColor.RED);
+        updateSidebarScoreboard();
 
         target.sendTitle(ChatColor.RED + "Вы спидранер", ChatColor.YELLOW + "Выберите сложность: /sp difficulty select ...", 10, 70, 20);
         target.sendMessage(ChatColor.GREEN + "Вам разблокирован 1-й шаг подготовки: "
@@ -618,6 +1001,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
 
         resetPlayerHealthAndMode(target);
         removePlayerFromScoreboardTeam(target);
+        updateSidebarScoreboard();
 
         sender.sendMessage(ChatColor.GREEN + "Игрок " + target.getName() + " больше не спидранер.");
         target.sendMessage(ChatColor.YELLOW + "С вас снята роль спидранера.");
@@ -636,6 +1020,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         hunterUuids.add(target.getUniqueId());
         assignPlayerToTeam(target, TEAM_HUNTERS, ChatColor.BLUE);
         giveHunterCompass(target);
+        updateSidebarScoreboard();
 
         target.sendTitle(ChatColor.BLUE + "Вы охотник", ChatColor.AQUA + "Ваша задача — остановить спидранера!", 10, 70, 20);
         Bukkit.broadcastMessage(ChatColor.GOLD + "[Manhunt] " + ChatColor.BLUE + target.getName() + ChatColor.YELLOW + " назначен Охотником!");
@@ -649,6 +1034,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
 
         removeHunterCompass(target);
         removePlayerFromScoreboardTeam(target);
+        updateSidebarScoreboard();
 
         sender.sendMessage(ChatColor.GREEN + "Игрок " + target.getName() + " удалён из команды охотников.");
         target.sendMessage(ChatColor.YELLOW + "С вас снята роль охотника.");
@@ -656,6 +1042,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
 
     private void resetGameFull(CommandSender sender) {
         resetInternalState(true);
+        clearSidebarScoreboard();
         gameState = GameState.IDLE;
         Bukkit.broadcastMessage(ChatColor.GOLD + "[Manhunt] " + ChatColor.RED
                 + "Весь процесс подготовки и настройки игры полностью сброшены администратором.");
@@ -663,6 +1050,9 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
 
     private void endGameCleanup(CommandSender sender) {
         cancelCountdown();
+        stopPauseImmediately(true);
+        clearSidebarScoreboard();
+
         World overworld = getMainOverworld();
         Location defaultSpawn = overworld.getSpawnLocation();
 
@@ -689,6 +1079,8 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         chosenStartLocation = null;
         lastRunnerLocations.clear();
         trackedRunnerEffects.clear();
+        elapsedGameSeconds = 0L;
+        pauseCooldownEndMillis = 0L;
         gameState = GameState.IDLE;
 
         Bukkit.broadcastMessage(ChatColor.GOLD + "[Manhunt] " + ChatColor.GREEN
@@ -738,7 +1130,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         chosenStartLocation = new Location(world, exactX, topY, exactZ, runnerLoc.getYaw(), runnerLoc.getPitch());
         world.setSpawnLocation(blockX, topY, blockZ);
 
-        // 1 & 2. Телепортация всех игроков на верхний блок по X и Z спидранера и установка спавнпоинта
         for (Player p : Bukkit.getOnlinePlayers()) {
             p.teleport(chosenStartLocation);
             if (p.getBedSpawnLocation() == null) {
@@ -752,7 +1143,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
             }
         }
 
-        // 3. Спидранер получает режим выживания и полное здоровье согласно выбранной сложности
         speedrunner.setGameMode(GameMode.SURVIVAL);
         double maxHp = selectedDifficulty.getSpeedrunnerMaxHealth();
         setPlayerMaxHealth(speedrunner, maxHp);
@@ -760,7 +1150,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         speedrunner.setFoodLevel(20);
         speedrunner.setSaturation(20f);
 
-        // 4. Центр мира прикрепляется к этой координате и становится размером 30 на 30 блоков до начала игры
         WorldBorder border = world.getWorldBorder();
         border.setCenter(exactX, exactZ);
         border.setSize(PRE_GAME_BORDER_SIZE);
@@ -848,6 +1237,8 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
 
     private void beginActiveGame() {
         gameState = GameState.IN_GAME;
+        elapsedGameSeconds = 0L;
+        pauseCooldownEndMillis = 0L;
 
         for (Player p : Bukkit.getOnlinePlayers()) {
             p.setGlowing(false);
@@ -887,6 +1278,8 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
                 giveHunterCompass(hunter);
             }
         }
+
+        updateSidebarScoreboard();
     }
 
     private void applyStartingEffects(Player runner, DifficultyMode difficulty) {
@@ -901,44 +1294,36 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
 
         switch (difficulty) {
             case EASY:
-                // Скорость V (+60 секунд за каждого охотника)
                 if (speedType != null) {
                     effectsToAdd.add(new PotionEffect(speedType, 20 * 60 * hunterCount, 4, false, true, true));
                 }
-                // Сила II (+10 минут за каждого охотника)
                 if (strengthType != null) {
                     effectsToAdd.add(new PotionEffect(strengthType, 20 * 600 * hunterCount, 1, false, true, true));
                 }
-                // Регенерация II (+15 минут за каждого охотника)
                 if (regenType != null) {
                     effectsToAdd.add(new PotionEffect(regenType, 20 * 900 * hunterCount, 1, false, true, true));
                 }
                 break;
 
             case MEDIUM:
-                // Скорость V (+30 секунд за каждого охотника)
                 if (speedType != null) {
                     effectsToAdd.add(new PotionEffect(speedType, 20 * 30 * hunterCount, 4, false, true, true));
                 }
-                // Сила I (+5 минут за каждого охотника)
                 if (strengthType != null) {
                     effectsToAdd.add(new PotionEffect(strengthType, 20 * 300 * hunterCount, 0, false, true, true));
                 }
-                // Регенерация II (+5 минут за каждого охотника)
                 if (regenType != null) {
                     effectsToAdd.add(new PotionEffect(regenType, 20 * 300 * hunterCount, 1, false, true, true));
                 }
                 break;
 
             case HARD:
-                // Скорость V (+15 секунд за каждого охотника)
                 if (speedType != null) {
                     effectsToAdd.add(new PotionEffect(speedType, 20 * 15 * hunterCount, 4, false, true, true));
                 }
                 break;
 
             case IMPOSSIBLE:
-                // Никаких бустов
                 break;
         }
 
@@ -964,6 +1349,9 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
             @Override
             public void run() {
                 if (gameState != GameState.IN_GAME && gameState != GameState.WAITING_READY && gameState != GameState.COUNTDOWN) {
+                    return;
+                }
+                if (gamePaused) {
                     return;
                 }
 
@@ -1039,8 +1427,76 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     }
 
     // =========================================================================
-    // СОБЫТИЯ ИГРЫ (LISTENERS)
+    // СОБЫТИЯ ИГРЫ И ЗАМОРОЗКИ (LISTENERS)
     // =========================================================================
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onPlayerMove(PlayerMoveEvent event) {
+        // Полный запрет передвижения во время активной паузы
+        if (gamePaused) {
+            Location from = event.getFrom();
+            Location to = event.getTo();
+            if (to != null && (from.getX() != to.getX() || from.getY() != to.getY() || from.getZ() != to.getZ())) {
+                event.setTo(from);
+            }
+            return;
+        }
+
+        if (gameState != GameState.IN_GAME) return;
+        Player player = event.getPlayer();
+        if (speedrunnerUuid != null && speedrunnerUuid.equals(player.getUniqueId())) {
+            Location to = event.getTo();
+            if (to != null && to.getWorld() != null) {
+                lastRunnerLocations.put(to.getWorld().getEnvironment(), to.clone());
+            }
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onBlockBreak(BlockBreakEvent event) {
+        if (gamePaused) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onBlockPlace(BlockPlaceEvent event) {
+        if (gamePaused) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onEntityDamage(EntityDamageEvent event) {
+        if (gamePaused) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onPlayerInteract(PlayerInteractEvent event) {
+        if (gamePaused) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onFoodLevelChange(FoodLevelChangeEvent event) {
+        if (gamePaused) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler
+    public void onPlayerJoin(PlayerJoinEvent event) {
+        Player p = event.getPlayer();
+        if (scoreboardActive && Bukkit.getScoreboardManager() != null) {
+            p.setScoreboard(Bukkit.getScoreboardManager().getMainScoreboard());
+        }
+        if (pauseBossBar != null) {
+            pauseBossBar.addPlayer(p);
+        }
+    }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onPlayerPortal(PlayerPortalEvent event) {
@@ -1065,20 +1521,8 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
-    public void onRunnerMove(PlayerMoveEvent event) {
-        if (gameState != GameState.IN_GAME) return;
-        Player player = event.getPlayer();
-        if (speedrunnerUuid != null && speedrunnerUuid.equals(player.getUniqueId())) {
-            Location to = event.getTo();
-            if (to != null && to.getWorld() != null) {
-                lastRunnerLocations.put(to.getWorld().getEnvironment(), to.clone());
-            }
-        }
-    }
-
-    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onPotionEffectChange(EntityPotionEffectEvent event) {
-        if (gameState != GameState.IN_GAME) return;
+        if (gameState != GameState.IN_GAME || gamePaused) return;
         if (!(event.getEntity() instanceof Player)) return;
 
         Player player = (Player) event.getEntity();
@@ -1097,12 +1541,10 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     public void onPlayerDeath(PlayerDeathEvent event) {
         Player deceased = event.getEntity();
 
-        // Компас охотника остаётся при смерти (не выпадает)
         if (hunterUuids.contains(deceased.getUniqueId())) {
             event.getDrops().removeIf(this::isHunterCompass);
         }
 
-        // Смерть спидранера в игре -> победа охотников
         if (gameState == GameState.IN_GAME && speedrunnerUuid != null && speedrunnerUuid.equals(deceased.getUniqueId())) {
             triggerHuntersWin();
         }
@@ -1123,6 +1565,10 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
 
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     public void onCompassDrop(PlayerDropItemEvent event) {
+        if (gamePaused) {
+            event.setCancelled(true);
+            return;
+        }
         if (hunterUuids.contains(event.getPlayer().getUniqueId())
                 && isHunterCompass(event.getItemDrop().getItemStack())) {
             event.setCancelled(true);
@@ -1137,7 +1583,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         if (speedrunnerUuid == null || !speedrunnerUuid.equals(player.getUniqueId())) return;
 
         String key = event.getAdvancement().getKey().toString();
-        // Достижение «Освободите Энд» (minecraft:end/kill_dragon)
         if (key.equals("minecraft:end/kill_dragon") || key.endsWith(":end/kill_dragon")) {
             triggerSpeedrunnerWin();
         }
@@ -1170,10 +1615,13 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
 
     private void triggerHuntersWin() {
         if (gameState == GameState.ENDED) return;
+        stopPauseImmediately(true);
         gameState = GameState.ENDED;
+        updateSidebarScoreboard();
 
         Bukkit.broadcastMessage(ChatColor.GOLD + "=============================================");
         Bukkit.broadcastMessage(ChatColor.BLUE + "Спидранер погиб! Победа Охотников (Hunters Wins!!)!");
+        Bukkit.broadcastMessage(ChatColor.YELLOW + "Итоговое время игры: " + ChatColor.GREEN + formatHhMmSs(elapsedGameSeconds));
         Bukkit.broadcastMessage(ChatColor.YELLOW + "Для полного завершения пропишите: /manhunt game end");
         Bukkit.broadcastMessage(ChatColor.GOLD + "=============================================");
 
@@ -1187,11 +1635,13 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
 
     private void triggerSpeedrunnerWin() {
         if (gameState == GameState.ENDED) return;
+        stopPauseImmediately(true);
         gameState = GameState.ENDED;
+        updateSidebarScoreboard();
 
         Bukkit.broadcastMessage(ChatColor.GOLD + "=============================================");
         Bukkit.broadcastMessage(ChatColor.RED + "Спидранер победил Эндер-дракона и получил достижение «Освободите Энд»!");
-        Bukkit.broadcastMessage(ChatColor.GREEN + "Победа Спидранера!");
+        Bukkit.broadcastMessage(ChatColor.GREEN + "Победа Спидранера! Время: " + formatHhMmSs(elapsedGameSeconds));
         Bukkit.broadcastMessage(ChatColor.YELLOW + "Для полного завершения пропишите: /manhunt game end");
         Bukkit.broadcastMessage(ChatColor.GOLD + "=============================================");
 
@@ -1292,6 +1742,8 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
 
     private void resetPlayerHealthAndMode(Player player) {
         player.setGlowing(false);
+        player.setWalkSpeed(0.2f);
+        player.setFlySpeed(0.1f);
         setPlayerMaxHealth(player, 20.0);
         if (player.getHealth() > 20.0) {
             player.setHealth(20.0);
@@ -1312,6 +1764,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
 
     private void resetInternalState(boolean resetWorldBorders) {
         cancelCountdown();
+        stopPauseImmediately(true);
         resetAllPlayerStates();
 
         speedrunnerUuid = null;
@@ -1321,6 +1774,8 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         chosenStartLocation = null;
         lastRunnerLocations.clear();
         trackedRunnerEffects.clear();
+        elapsedGameSeconds = 0L;
+        pauseCooldownEndMillis = 0L;
 
         if (resetWorldBorders) {
             resetWorldBorder(getMainOverworld());
@@ -1376,12 +1831,37 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         sender.sendMessage(ChatColor.GOLD + "===============================================");
     }
 
+    private void sendFullModInfo(CommandSender sender) {
+        sender.sendMessage(ChatColor.GOLD + "========== Информация о моде Asonsss_manhunt (v1.2.0) ==========");
+        sender.sendMessage(ChatColor.AQUA + "Команды администратора:");
+        sender.sendMessage(ChatColor.YELLOW + " • /manhunt game start_prepare " + ChatColor.GRAY + "— запустить подготовку к игре и включить Scoreboard");
+        sender.sendMessage(ChatColor.YELLOW + " • /manhunt speedruner add/remove <Игрок> " + ChatColor.GRAY + "— назначить или удалить спидранера");
+        sender.sendMessage(ChatColor.YELLOW + " • /manhunt hunter add/remove <Игрок> " + ChatColor.GRAY + "— назначить или удалить охотника");
+        sender.sendMessage(ChatColor.YELLOW + " • /manhunt game reset " + ChatColor.GRAY + "— полностью сбросить подготовку, роли и настройки");
+        sender.sendMessage(ChatColor.YELLOW + " • /manhunt game end " + ChatColor.GRAY + "— завершить игру, вернуть всех на спавн и сбросить роли");
+
+        sender.sendMessage(ChatColor.RED + "Команды спидранера (по порядку):");
+        sender.sendMessage(ChatColor.YELLOW + " • /sp difficulty select <easy|medium|hard|impossible> " + ChatColor.GRAY + "— выбрать сложность игры");
+        sender.sendMessage(ChatColor.YELLOW + " • /sp pickplace start " + ChatColor.GRAY + "— полёт в режиме Наблюдателя для выбора места старта");
+        sender.sendMessage(ChatColor.YELLOW + " • /sp pickplace end " + ChatColor.GRAY + "— зафиксировать место старта и телепортировать всех игроков");
+        sender.sendMessage(ChatColor.YELLOW + " • /fortrest " + ChatColor.GRAY + "— узнать координаты ближайшей крепости Ада (только на EASY)");
+
+        sender.sendMessage(ChatColor.GREEN + "Общие команды для всех игроков:");
+        sender.sendMessage(ChatColor.YELLOW + " • /ready " + ChatColor.GRAY + "— подтвердить готовность к началу игры (включает свечение)");
+        sender.sendMessage(ChatColor.YELLOW + " • /unready " + ChatColor.GRAY + "— отменить готовность к началу игры");
+        sender.sendMessage(ChatColor.YELLOW + " • /pause <секунды> (или /p <секунды>) " + ChatColor.GRAY + "— заморозить игру и мир (до 180 сек, КД 10 мин)");
+        sender.sendMessage(ChatColor.YELLOW + " • /manhunt difficulty info " + ChatColor.GRAY + "— подробное описание всех режимов сложности");
+        sender.sendMessage(ChatColor.YELLOW + " • /manhunt info " + ChatColor.GRAY + "— показать этот список всех команд плагина");
+        sender.sendMessage(ChatColor.GOLD + "================================================================");
+    }
+
     private void sendManhuntHelp(CommandSender sender) {
-        sender.sendMessage(ChatColor.GOLD + "=== Команды Asonsss_manhunt (v26.3) ===");
-        sender.sendMessage(ChatColor.YELLOW + "/manhunt game start_prepare [new_world] " + ChatColor.GRAY + "— начать подготовку к игре");
+        sender.sendMessage(ChatColor.GOLD + "=== Команды Asonsss_manhunt (v1.2.0) ===");
+        sender.sendMessage(ChatColor.YELLOW + "/manhunt info " + ChatColor.GRAY + "— полное описание всех команд мода");
+        sender.sendMessage(ChatColor.YELLOW + "/manhunt difficulty info " + ChatColor.GRAY + "— информация о сложностях");
+        sender.sendMessage(ChatColor.YELLOW + "/manhunt game start_prepare " + ChatColor.GRAY + "— начать подготовку к игре");
         sender.sendMessage(ChatColor.YELLOW + "/manhunt speedruner add/remove <Игрок> " + ChatColor.GRAY + "— назначить/убрать спидранера");
         sender.sendMessage(ChatColor.YELLOW + "/manhunt hunter add/remove <Игрок> " + ChatColor.GRAY + "— назначить/убрать охотника");
-        sender.sendMessage(ChatColor.YELLOW + "/manhunt difficulty info " + ChatColor.GRAY + "— информация о сложностях");
         sender.sendMessage(ChatColor.YELLOW + "/manhunt game reset " + ChatColor.GRAY + "— полный сброс подготовки");
         sender.sendMessage(ChatColor.YELLOW + "/manhunt game end " + ChatColor.GRAY + "— завершить игру и сбросить всё");
     }
@@ -1396,7 +1876,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
 
         if (cmd.equals("manhunt")) {
             if (args.length == 1) {
-                return filterStartsWith(Arrays.asList("game", "speedruner", "hunter", "difficulty"), args[0]);
+                return filterStartsWith(Arrays.asList("game", "speedruner", "hunter", "difficulty", "info"), args[0]);
             }
             if (args.length == 2) {
                 switch (args[0].toLowerCase(Locale.ROOT)) {
@@ -1417,7 +1897,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
                 if (args[0].equalsIgnoreCase("speedruner")
                         || args[0].equalsIgnoreCase("speedrunner")
                         || args[0].equalsIgnoreCase("hunter")) {
-                    return null; // Стандартный список онлайн-игроков
+                    return null;
                 }
             }
         }
@@ -1436,6 +1916,12 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
             }
             if (args.length == 3 && args[0].equalsIgnoreCase("difficulty") && args[1].equalsIgnoreCase("select")) {
                 return filterStartsWith(Arrays.asList("easy", "medium", "hard", "impossible"), args[2]);
+            }
+        }
+
+        if (cmd.equals("pause")) {
+            if (args.length == 1) {
+                return filterStartsWith(Arrays.asList("30", "60", "120", "180"), args[0]);
             }
         }
 
