@@ -21,4 +21,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Asonsss_manhunt-jar
-          path: target/Asonsss_manhunt-26.3.jar
+          path: target/Asonsss_manhunt-*.jar
