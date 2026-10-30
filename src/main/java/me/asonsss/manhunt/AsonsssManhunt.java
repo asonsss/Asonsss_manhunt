@@ -78,14 +78,14 @@ import java.util.UUID;
 import java.util.stream.Collectors;
 
 /**
- * Полный исходный код плагина: Asonsss_manhunt (Версия 1.3.1 — Bugfix Release)
+ * Полный исходный код плагина: Asonsss_manhunt (Версия 1.3.2 — Bugfix Release)
  *
  * ======================== 1. ФАЙЛ src/main/resources/plugin.yml ========================
  * name: Asonsss_manhunt
- * version: '1.3.1'
+ * version: '1.3.2'
  * main: me.asonsss.manhunt.AsonsssManhunt
  * api-version: '1.21'
- * description: Manhunt plugin v1.3.1 with waiting barrier box, combat pause lock, compass command, scoreboard and dimensional tracking
+ * description: Manhunt plugin v1.3.2 with waiting barrier box, combat pause lock, compass command, scoreboard and dimensional tracking
  * commands:
  *   manhunt:
  *     description: Основная команда управления Manhunt
@@ -119,7 +119,7 @@ import java.util.stream.Collectors;
  *     <modelVersion>4.0.0</modelVersion>
  *     <groupId>me.asonsss</groupId>
  *     <artifactId>Asonsss_manhunt</artifactId>
- *     <version>1.3.1</version>
+ *     <version>1.3.2</version>
  *     <packaging>jar</packaging>
  *     <properties>
  *         <maven.compiler.source>21</maven.compiler.source>
@@ -160,7 +160,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         EASY("EASY", ChatColor.GREEN, 30.0, 10000.0, 1000.0),
         MEDIUM("MEDIUM", ChatColor.YELLOW, 30.0, 9000.0, 500.0),
         HARD("HARD", ChatColor.RED, 20.0, 8000.0, 500.0),
-        IMPOSSIBLE("IMPOSSIBLE", ChatColor.DARK_PURPLE, 20.0, 60000000.0, 500.0);
+        IMPOSSIBLE("IMPOSSIBLE", ChatColor.DARK_PURPLE, 20.0, 30000000.0, 500.0);
 
         private final String displayName;
         private final ChatColor color;
@@ -226,7 +226,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     private static final String TEAM_HUNTERS = "mh_hunters";
     private static final String OBJECTIVE_SIDEBAR = "mh_sidebar";
     private static final double PRE_GAME_BORDER_SIZE = 30.0;
-    private static final double DEFAULT_MINECRAFT_BORDER = 60000000.0; // Стандартная граница (30 млн блоков)
+    private static final double DEFAULT_MINECRAFT_BORDER = 30000000.0; // 30 миллионов блоков (не превышает лимит движка 59 999 968)
     private static final long IMPOSSIBLE_TIME_LIMIT_SECONDS = 4L * 60L * 60L; // 4 часа = 14400 секунд
     private static final int MAX_PAUSE_SECONDS = 180;
     private static final long PAUSE_COOLDOWN_MILLIS = 10L * 60L * 1000L; // 10 минут
@@ -291,7 +291,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         startCompassAndEffectTask();
         startScoreboardAndTimerTask();
 
-        getLogger().info("Asonsss_manhunt v1.3.1 успешно запущен!");
+        getLogger().info("Asonsss_manhunt v1.3.2 успешно запущен!");
     }
 
     @Override
@@ -1033,7 +1033,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     // =========================================================================
 
     private Location buildWaitingBox(World world) {
-        // Гарантируем загрузку чанков вокруг (0, 0) перед постройкой коробки и телепортацией
         for (int cx = -1; cx <= 1; cx++) {
             for (int cz = -1; cz <= 1; cz++) {
                 Chunk chunk = world.getChunkAt(cx, cz);
@@ -1093,7 +1092,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     }
 
     private void applyPreparationWorldRules(World overworld, Location boxSpawn) {
-        // 1. Выключаем ПВП и фиксируем время на 0
         for (World w : Bukkit.getWorlds()) {
             try {
                 w.setPVP(false);
@@ -1105,7 +1103,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         dispatchConsoleCommandSafe("gamerule spawnRadius 0");
         dispatchConsoleCommandSafe("time set 0");
 
-        // 2. Устанавливаем мировой спавнпоинт прямо внутри коробки из барьеров (0, 251, 0)
         chosenStartLocation = boxSpawn.clone();
         try {
             overworld.setSpawnLocation(boxSpawn);
@@ -1114,7 +1111,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         }
         dispatchConsoleCommandSafe("setworldspawn 0 " + boxSpawn.getBlockY() + " 0");
 
-        // 3. Телепортируем всех игроков в коробку, ставим им точку возрождения в коробке и выдаём эффект сытости
         PotionEffectType saturationType = resolvePotionEffect("saturation", "SATURATION");
         for (Player p : Bukkit.getOnlinePlayers()) {
             p.setGameMode(GameMode.SURVIVAL);
@@ -1203,7 +1199,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
             activeOverworld = getMainOverworld();
         }
 
-        // Строим коробку ожидания 20x20x20 из барьеров на (0, 250, 0), ставим там спавн и переносим всех игроков
         Location boxSpawn = buildWaitingBox(activeOverworld);
         applyPreparationWorldRules(activeOverworld, boxSpawn);
 
@@ -1399,7 +1394,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         Location runnerLoc = speedrunner.getLocation();
         World world = runnerLoc.getWorld() != null ? runnerLoc.getWorld() : getMainOverworld();
 
-        // Убираем коробку ожидания из барьеров перед расчётом самого верхнего блока поверхности
         removeWaitingBox();
 
         double exactX = runnerLoc.getX();
@@ -1410,7 +1404,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
 
         chosenStartLocation = new Location(world, exactX, topY, exactZ, runnerLoc.getYaw(), runnerLoc.getPitch());
 
-        // Переносим мировой спавнпоинт из коробки ожидания на выбранную спидранером точку старта
         try {
             world.setSpawnLocation(chosenStartLocation);
         } catch (Throwable ignored) {
@@ -1534,7 +1527,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         combatCooldownEndMillis = 0L;
 
         removeWaitingBox();
-        // Включаем ПВП, возобновляем смену суток, снимаем эффект сытости и отключаем locatorBar
         applyActiveGameWorldRules();
 
         for (Player p : Bukkit.getOnlinePlayers()) {
@@ -1552,12 +1544,18 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
             border.setCenter(chosenStartLocation.getX(), chosenStartLocation.getZ());
         }
 
-        if (selectedDifficulty == DifficultyMode.IMPOSSIBLE) {
-            border.setCenter(0.0, 0.0);
-            border.setSize(DEFAULT_MINECRAFT_BORDER);
-            Bukkit.broadcastMessage(ChatColor.DARK_PURPLE + "[Manhunt] Режим IMPOSSIBLE: у спидранера есть ровно 4 часа, чтобы победить дракона!");
-        } else if (selectedDifficulty != null) {
-            border.setSize(selectedDifficulty.getGameBorderSize());
+        // Установка границы мира по выбранной сложности (для IMPOSSIBLE — ровно 30 000 000 блоков)
+        try {
+            if (selectedDifficulty == DifficultyMode.IMPOSSIBLE) {
+                border.setSize(DEFAULT_MINECRAFT_BORDER);
+                dispatchConsoleCommandSafe("worldborder set 30000000");
+                Bukkit.broadcastMessage(ChatColor.DARK_PURPLE + "[Manhunt] Режим IMPOSSIBLE: граница мира 30 000 000 блоков! У спидранера есть 4 часа, чтобы победить дракона!");
+            } else if (selectedDifficulty != null) {
+                border.setSize(selectedDifficulty.getGameBorderSize());
+                dispatchConsoleCommandSafe("worldborder set " + (int) selectedDifficulty.getGameBorderSize());
+            }
+        } catch (Throwable t) {
+            getLogger().warning("Не удалось установить размер WorldBorder: " + t.getMessage());
         }
 
         Player runner = speedrunnerUuid != null ? Bukkit.getPlayer(speedrunnerUuid) : null;
@@ -1774,7 +1772,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
             return;
         }
 
-        // На этапе подготовки ПВП полностью отключено
         if (isPreparationStage() || gameState == GameState.COUNTDOWN) {
             if (event.getEntity() instanceof Player) {
                 Player attacker = resolveAttackerPlayer(event.getDamager());
@@ -1785,7 +1782,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
             }
         }
 
-        // Отслеживание ударов между охотником и спидранером во время игры (блокировка /pause на 1 минуту)
         if (gameState == GameState.IN_GAME && event.getEntity() instanceof Player) {
             Player victim = (Player) event.getEntity();
             Player attacker = resolveAttackerPlayer(event.getDamager());
@@ -1928,7 +1924,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     public void onPlayerRespawn(PlayerRespawnEvent event) {
         Player player = event.getPlayer();
 
-        // На этапе подготовки всегда возрождаем в коробке ожидания (или на выбранном спавне, если нет кровати)
         if (isPreparationStage() && chosenStartLocation != null) {
             event.setRespawnLocation(chosenStartLocation);
         } else if (!event.isBedSpawn() && !event.isAnchorSpawn() && chosenStartLocation != null) {
@@ -2122,10 +2117,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         player.setPlayerListName(player.getName());
     }
 
-    /**
-     * Безопасная установка максимального здоровья для любых версий (включая 1.21.3+ и 26.3,
-     * где org.bukkit.attribute.Attribute был переделан из enum в интерфейс).
-     */
     @SuppressWarnings("deprecation")
     private void setPlayerMaxHealth(Player player, double maxHealth) {
         try {
@@ -2217,6 +2208,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
             WorldBorder border = world.getWorldBorder();
             border.setCenter(0.0, 0.0);
             border.setSize(DEFAULT_MINECRAFT_BORDER);
+            dispatchConsoleCommandSafe("worldborder set 30000000");
         } catch (Throwable ignored) {
         }
     }
@@ -2265,7 +2257,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     }
 
     private void sendFullModInfo(CommandSender sender) {
-        sender.sendMessage(ChatColor.GOLD + "========== Информация о моде Asonsss_manhunt (v1.3.1) ==========");
+        sender.sendMessage(ChatColor.GOLD + "========== Информация о моде Asonsss_manhunt (v1.3.2) ==========");
         sender.sendMessage(ChatColor.AQUA + "Команды администратора:");
         sender.sendMessage(ChatColor.YELLOW + " • /manhunt game start_prepare " + ChatColor.GRAY + "— запустить подготовку, создать комнату ожидания и включить Scoreboard");
         sender.sendMessage(ChatColor.YELLOW + " • /manhunt speedruner add/remove <Игрок> " + ChatColor.GRAY + "— назначить или удалить спидранера");
@@ -2292,7 +2284,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     }
 
     private void sendManhuntHelp(CommandSender sender) {
-        sender.sendMessage(ChatColor.GOLD + "=== Команды Asonsss_manhunt (v1.3.1) ===");
+        sender.sendMessage(ChatColor.GOLD + "=== Команды Asonsss_manhunt (v1.3.2) ===");
         sender.sendMessage(ChatColor.YELLOW + "/manhunt info " + ChatColor.GRAY + "— полное описание всех команд мода");
         sender.sendMessage(ChatColor.YELLOW + "/manhunt difficulty info " + ChatColor.GRAY + "— информация о сложностях");
         sender.sendMessage(ChatColor.YELLOW + "/manhunt game start_prepare " + ChatColor.GRAY + "— начать подготовку к игре");
