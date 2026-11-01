@@ -1,8 +1,8 @@
 name: Asonsss_manhunt
-version: '1.3.2'
+version: '1.4.0'
 main: me.asonsss.manhunt.AsonsssManhunt
 api-version: '1.21'
-description: Manhunt plugin v1.3.2 with waiting barrier box, combat pause lock, compass command, scoreboard and dimensional tracking
+description: Manhunt plugin v1.4.0 with portal lock/protection, dynamic border transitions, electric piano arpeggio, waiting box and scoreboard
 commands:
   manhunt:
     description: Основная команда управления Manhunt
