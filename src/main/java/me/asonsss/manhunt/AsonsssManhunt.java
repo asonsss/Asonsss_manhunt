@@ -84,14 +84,14 @@ import java.util.UUID;
 import java.util.stream.Collectors;
 
 /**
- * Полный исходный код плагина: Asonsss_manhunt (Версия 1.4.0)
+ * Полный исходный код плагина: Asonsss_manhunt (Версия 1.4.1 — Bugfix Release)
  *
  * ======================== 1. ФАЙЛ src/main/resources/plugin.yml ========================
  * name: Asonsss_manhunt
- * version: '1.4.0'
+ * version: '1.4.1'
  * main: me.asonsss.manhunt.AsonsssManhunt
  * api-version: '1.21'
- * description: Manhunt plugin v1.4.0 with portal lock/protection, dynamic border countdown, electric piano arpeggio, waiting box and scoreboard
+ * description: Manhunt plugin v1.4.1 with exact second-based border transitions, portal chat warning with note sound, and scoreboard
  * commands:
  *   manhunt:
  *     description: Основная команда управления Manhunt
@@ -125,7 +125,7 @@ import java.util.stream.Collectors;
  *     <modelVersion>4.0.0</modelVersion>
  *     <groupId>me.asonsss</groupId>
  *     <artifactId>Asonsss_manhunt</artifactId>
- *     <version>1.4.0</version>
+ *     <version>1.4.1</version>
  *     <packaging>jar</packaging>
  *     <properties>
  *         <maven.compiler.source>21</maven.compiler.source>
@@ -258,14 +258,12 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     }
 
     // Звуки через строковые ключи (безопасно для 1.21.3+ / 26.3, где Sound стал интерфейсом)
-    // block.note_block.pling — это звук "Электропианино" (Electric Piano) в Minecraft
     private static final String SOUND_ELECTRIC_PIANO = "block.note_block.pling";
     private static final String SOUND_LEVELUP = "entity.player.levelup";
     private static final String SOUND_WITHER_SPAWN = "entity.wither.spawn";
     private static final String SOUND_CHALLENGE_COMPLETE = "ui.toast.challenge_complete";
 
     // Высота нот (pitch) электропианино для обратного отсчёта:
-    // В нотном блоке Minecraft: F#1 = 0.5f, C1 = 2^(-6/12), E1 = 2^(-2/12), G2 = 2^(1/12), C2 = 2^(6/12), E2 = 2^(10/12)
     private static final float PITCH_C_OCTAVE_1 = 0.707107f; // 15-5 сек: C (первая гамма)
     private static final float PITCH_E_OCTAVE_1 = 0.890899f; // 4 сек: E (первая гамма)
     private static final float PITCH_G_OCTAVE_2 = 1.059463f; // 3 сек: G (вторая гамма)
@@ -318,6 +316,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     private boolean waitingBoxBuilt = false;
 
     private BukkitTask countdownTask = null;
+    private BukkitTask borderTransitionTask = null;
     private BukkitTask gameLoopTask = null;
     private BukkitTask scoreboardAndTimerTask = null;
 
@@ -354,12 +353,13 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         startCompassAndEffectTask();
         startScoreboardAndTimerTask();
 
-        getLogger().info("Asonsss_manhunt v1.4.0 успешно запущен!");
+        getLogger().info("Asonsss_manhunt v1.4.1 успешно запущен!");
     }
 
     @Override
     public void onDisable() {
         cancelCountdown();
+        cancelBorderTransition();
         stopPauseImmediately(false);
         removeWaitingBox();
         if (gameLoopTask != null) {
@@ -408,6 +408,70 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     }
 
     // =========================================================================
+    // ТОЧНОЕ ПОСЕКУНДНОЕ ИЗМЕНЕНИЕ ГРАНИЦЫ МИРА (1 СЕКУНДА = 20 ТИКОВ)
+    // =========================================================================
+
+    /**
+     * Плавно изменяет размер границы мира от startSize до targetSize ровно за durationSeconds секунд
+     * (из расчёта 1 секунда = 20 тиков сервера), автоматически приостанавливаясь на время /pause.
+     */
+    private void startBorderTransitionInSeconds(World world, double startSize, double targetSize, long durationSeconds) {
+        cancelBorderTransition();
+        if (world == null) return;
+
+        final WorldBorder border = world.getWorldBorder();
+        try {
+            border.setSize(startSize);
+        } catch (Throwable ignored) {
+        }
+
+        if (durationSeconds <= 0L || Math.abs(targetSize - startSize) < 0.01) {
+            try {
+                border.setSize(targetSize);
+            } catch (Throwable ignored) {
+            }
+            return;
+        }
+
+        final long totalTicks = durationSeconds * 20L; // Переводим секунды в тики (20 тиков = 1 секунда)
+
+        borderTransitionTask = new BukkitRunnable() {
+            long elapsedTicks = 0L;
+
+            @Override
+            public void run() {
+                if (gamePaused) {
+                    return; // На время активной паузы граница мира стоит на месте
+                }
+                elapsedTicks++;
+                if (elapsedTicks >= totalTicks) {
+                    try {
+                        border.setSize(targetSize);
+                    } catch (Throwable ignored) {
+                    }
+                    this.cancel();
+                    borderTransitionTask = null;
+                    return;
+                }
+
+                double progress = (double) elapsedTicks / (double) totalTicks;
+                double nextSize = startSize + (targetSize - startSize) * progress;
+                try {
+                    border.setSize(nextSize);
+                } catch (Throwable ignored) {
+                }
+            }
+        }.runTaskTimer(this, 1L, 1L);
+    }
+
+    private void cancelBorderTransition() {
+        if (borderTransitionTask != null) {
+            borderTransitionTask.cancel();
+            borderTransitionTask = null;
+        }
+    }
+
+    // =========================================================================
     // ОБРАБОТКА КОМАНД
     // =========================================================================
 
@@ -450,13 +514,11 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
 
         String sub = args[0].toLowerCase(Locale.ROOT);
 
-        // /manhunt info — показывает все команды мода и что они делают (доступна всем)
         if (sub.equals("info")) {
             sendFullModInfo(sender);
             return true;
         }
 
-        // /manhunt difficulty info — доступна любому игроку в любое время
         if (sub.equals("difficulty")) {
             if (args.length >= 2 && args[1].equalsIgnoreCase("info")) {
                 sendDifficultyInfo(sender);
@@ -466,7 +528,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
             return true;
         }
 
-        // Остальные подкоманды /manhunt требуют прав администратора (OP)
         if (!sender.isOp() && !sender.hasPermission("manhunt.admin")) {
             sender.sendMessage(ChatColor.RED + "У вас нет прав администратора для выполнения этой команды.");
             return true;
@@ -886,18 +947,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     private void applyFreezeState(int pauseSeconds) {
         dispatchConsoleCommandSafe("tick freeze");
 
-        // Если пауза включена в первые 200 секунд расширения зоны, фиксируем текущий размер на время паузы
-        if (elapsedGameSeconds < GAME_START_BORDER_EXPAND_SECONDS) {
-            World world = getGameBorderWorld();
-            if (world != null) {
-                try {
-                    WorldBorder border = world.getWorldBorder();
-                    border.setSize(border.getSize());
-                } catch (Throwable ignored) {
-                }
-            }
-        }
-
         savedEffectsDuringPause.clear();
         PotionEffectType slowType = resolvePotionEffect("slowness", "SLOWNESS", "SLOW");
         int ticks = (pauseSeconds + 5) * 20;
@@ -919,20 +968,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     private void finishPauseNormally() {
         stopPauseImmediately(true);
         pauseCooldownEndMillis = System.currentTimeMillis() + PAUSE_COOLDOWN_MILLIS;
-
-        // Возобновляем оставшееся время расширения границы мира (если ещё не прошло 200 секунд со старта)
-        if (gameState == GameState.IN_GAME && selectedDifficulty != null && elapsedGameSeconds < GAME_START_BORDER_EXPAND_SECONDS) {
-            long remainingExpand = Math.max(1L, GAME_START_BORDER_EXPAND_SECONDS - elapsedGameSeconds);
-            double targetSize = selectedDifficulty.getGameBorderSize();
-            World world = getGameBorderWorld();
-            if (world != null) {
-                try {
-                    world.getWorldBorder().setSize(targetSize, remainingExpand);
-                    dispatchConsoleCommandSafe("worldborder set " + (int) targetSize + " " + remainingExpand);
-                } catch (Throwable ignored) {
-                }
-            }
-        }
 
         Bukkit.broadcastMessage(ChatColor.GOLD + "[Manhunt] " + ChatColor.GREEN
                 + "Пауза окончена! Игра продолжается. Следующая пауза будет доступна через 10 минут.");
@@ -1396,6 +1431,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
 
     private void endGameCleanup(CommandSender sender) {
         cancelCountdown();
+        cancelBorderTransition();
         stopPauseImmediately(true);
         removeWaitingBox();
         clearSidebarScoreboard();
@@ -1458,14 +1494,13 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     // =========================================================================
 
     private void startPickPlace(Player speedrunner) {
+        cancelBorderTransition();
         gameState = GameState.PICKING_PLACE;
 
         World overworld = getMainOverworld();
         WorldBorder border = overworld.getWorldBorder();
         border.setCenter(0.0, 0.0);
         border.setSize(selectedDifficulty.getPickPlaceBorderSize());
-        dispatchConsoleCommandSafe("worldborder center 0 0");
-        dispatchConsoleCommandSafe("worldborder set " + (int) selectedDifficulty.getPickPlaceBorderSize());
 
         int highestY = getHighestSurfaceYIgnoringBarriers(overworld, 0, 0);
         Location centerLoc = new Location(overworld, 0.5, highestY + 10.0, 0.5);
@@ -1483,6 +1518,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     }
 
     private void endPickPlace(Player speedrunner) {
+        cancelBorderTransition();
         Location runnerLoc = speedrunner.getLocation();
         World world = runnerLoc.getWorld() != null ? runnerLoc.getWorld() : getMainOverworld();
 
@@ -1531,8 +1567,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         WorldBorder border = world.getWorldBorder();
         border.setCenter(exactX, exactZ);
         border.setSize(PRE_GAME_BORDER_SIZE);
-        dispatchConsoleCommandSafe("worldborder center " + exactX + " " + exactZ);
-        dispatchConsoleCommandSafe("worldborder set 30");
 
         readyPlayers.clear();
         gameState = GameState.WAITING_READY;
@@ -1581,16 +1615,10 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         cancelCountdown();
         gameState = GameState.COUNTDOWN;
 
-        // 1) Как только все игроки прописали /ready, зона начинает постепенно сужаться с 30 блоков до 5 за 15 секунд
+        // 1) Как только все игроки прописали /ready, зона начинает постепенно сужаться с 30 блоков до 5 ровно за 15 СЕКУНД (300 тиков)
         World world = getGameBorderWorld();
         if (world != null) {
-            try {
-                WorldBorder border = world.getWorldBorder();
-                border.setSize(PRE_GAME_BORDER_SIZE);
-                border.setSize(COUNTDOWN_MIN_BORDER_SIZE, COUNTDOWN_SHRINK_SECONDS);
-                dispatchConsoleCommandSafe("worldborder set 5 15");
-            } catch (Throwable ignored) {
-            }
+            startBorderTransitionInSeconds(world, PRE_GAME_BORDER_SIZE, COUNTDOWN_MIN_BORDER_SIZE, COUNTDOWN_SHRINK_SECONDS);
         }
 
         countdownTask = new BukkitRunnable() {
@@ -1618,14 +1646,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         }.runTaskTimer(this, 0L, 20L);
     }
 
-    /**
-     * Звучание обратного отсчёта перед началом игры (электропианино):
-     * 15-5 сек: C (первая гамма)
-     * 4 сек: E (первая гамма)
-     * 3 сек: G (вторая гамма)
-     * 2 сек: C (вторая гамма)
-     * 1 сек: E (вторая гамма)
-     */
     private float getCountdownPianoPitch(int secondsLeft) {
         if (secondsLeft >= 5) {
             return PITCH_C_OCTAVE_1;
@@ -1653,18 +1673,15 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
 
     /**
      * 3) Если во время 15 секунд обратного отсчёта кто-либо прописал /unready (или вышел),
-     * зона возвращается до 30 блоков за 1 секунду.
+     * зона возвращается до 30 блоков ровно за 1 СЕКУНДУ (20 тиков).
      */
     private void cancelCountdownAndRestoreBorder() {
         cancelCountdown();
         gameState = GameState.WAITING_READY;
         World world = getGameBorderWorld();
         if (world != null) {
-            try {
-                world.getWorldBorder().setSize(PRE_GAME_BORDER_SIZE, UNREADY_EXPAND_SECONDS);
-                dispatchConsoleCommandSafe("worldborder set 30 1");
-            } catch (Throwable ignored) {
-            }
+            double currentSize = world.getWorldBorder().getSize();
+            startBorderTransitionInSeconds(world, currentSize, PRE_GAME_BORDER_SIZE, UNREADY_EXPAND_SECONDS);
         }
         Bukkit.broadcastMessage(ChatColor.RED + "[Manhunt] Обратный отсчёт отменён! Зона возвращается до 30 блоков.");
     }
@@ -1706,23 +1723,18 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
             border.setCenter(chosenStartLocation.getX(), chosenStartLocation.getZ());
         }
 
-        // 2) Как только игра начинается, зона за 200 секунд расширяется до размеров, которые обозначены в выбранной сложности
-        try {
-            if (selectedDifficulty != null) {
-                double targetSize = selectedDifficulty.getGameBorderSize();
-                border.setSize(targetSize, GAME_START_BORDER_EXPAND_SECONDS);
-                dispatchConsoleCommandSafe("worldborder set " + (int) targetSize + " " + GAME_START_BORDER_EXPAND_SECONDS);
+        // 2) Как только игра начинается, зона ровно за 200 СЕКУНД (4000 тиков) расширяется до размеров выбранной сложности
+        if (selectedDifficulty != null) {
+            double targetSize = selectedDifficulty.getGameBorderSize();
+            startBorderTransitionInSeconds(world, COUNTDOWN_MIN_BORDER_SIZE, targetSize, GAME_START_BORDER_EXPAND_SECONDS);
 
-                if (selectedDifficulty == DifficultyMode.IMPOSSIBLE) {
-                    Bukkit.broadcastMessage(ChatColor.DARK_PURPLE + "[Manhunt] Режим IMPOSSIBLE: зона расширяется до 30 000 000 блоков за 200 сек.! У спидранера есть 4 часа!");
-                } else {
-                    Bukkit.broadcastMessage(ChatColor.GOLD + "[Manhunt] " + ChatColor.YELLOW
-                            + "Граница мира расширяется до " + ChatColor.AQUA + (int) targetSize
-                            + " блоков " + ChatColor.YELLOW + "за 200 секунд!");
-                }
+            if (selectedDifficulty == DifficultyMode.IMPOSSIBLE) {
+                Bukkit.broadcastMessage(ChatColor.DARK_PURPLE + "[Manhunt] Режим IMPOSSIBLE: зона расширяется до 30 000 000 блоков за 200 сек.! У спидранера есть 4 часа!");
+            } else {
+                Bukkit.broadcastMessage(ChatColor.GOLD + "[Manhunt] " + ChatColor.YELLOW
+                        + "Граница мира расширяется до " + ChatColor.AQUA + (int) targetSize
+                        + " блоков " + ChatColor.YELLOW + "за 200 секунд!");
             }
-        } catch (Throwable t) {
-            getLogger().warning("Не удалось установить расширение WorldBorder: " + t.getMessage());
         }
 
         Player runner = speedrunnerUuid != null ? Bukkit.getPlayer(speedrunnerUuid) : null;
@@ -1908,8 +1920,17 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     }
 
     // =========================================================================
-    // МЕХАНИКА ПОРТАЛОВ СПИДРАНЕРА (ЗАПРЕТ ЧУЖИХ ПОРТАЛОВ В АДУ И ЗАЩИТА ОТ ЛОМАНИЯ)
+    // МЕХАНИКА ПОРТАЛОВ СПИДРАНЕРА (УВЕДОМЛЕНИЕ В ЧАТ + ЗВУК НОТЫ И ЗАЩИТА)
     // =========================================================================
+
+    private void sendWrongPortalWarning(Player player) {
+        long now = System.currentTimeMillis();
+        if (now - lastWrongPortalWarningMillis > 1200L) {
+            lastWrongPortalWarningMillis = now;
+            player.sendMessage(ChatColor.RED + "Для возращения войдите в свой первоначальный портал");
+            playSoundSafe(player, SOUND_ELECTRIC_PIANO, 1.0f, 1.0f);
+        }
+    }
 
     private void collectPortalBlocksAround(Location center, int radius, Set<BlockPos> destinationSet) {
         if (center == null || center.getWorld() == null) return;
@@ -1931,7 +1952,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
             }
         }
 
-        // Добавляем все блоки обсидиановой рамки вокруг найденных блоков портала
         for (Block pb : portalBlocks) {
             for (int dx = -1; dx <= 1; dx++) {
                 for (int dy = -1; dy <= 1; dy++) {
@@ -1994,7 +2014,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         if (runnerOverworldPortalBlocks.contains(pos) || runnerInitialNetherPortalBlocks.contains(pos)) {
             return true;
         }
-        // Если сломан обсидиан, примыкающий к блоку портала спидранера
         if (block.getType() == Material.OBSIDIAN || block.getType() == Material.NETHER_PORTAL) {
             BlockFace[] faces = {BlockFace.NORTH, BlockFace.SOUTH, BlockFace.EAST, BlockFace.WEST, BlockFace.UP, BlockFace.DOWN};
             for (BlockFace face : faces) {
@@ -2086,7 +2105,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         if (speedrunnerUuid != null && speedrunnerUuid.equals(player.getUniqueId())) {
             World world = to.getWorld();
             if (world != null) {
-                // В Аду не пускаем спидранера в рамки чужого/другого портала
+                // В Аду не пускаем спидранера в рамки чужого/другого портала: пишем в чат и играем ноту
                 if (world.getEnvironment() == World.Environment.NETHER
                         && !runnerInitialNetherPortalBlocks.isEmpty()
                         && isLocationTouchingNetherPortal(to)
@@ -2097,15 +2116,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
                         pushBack.normalize().multiply(0.35);
                         player.setVelocity(pushBack);
                     }
-                    long now = System.currentTimeMillis();
-                    if (now - lastWrongPortalWarningMillis > 1200L) {
-                        lastWrongPortalWarningMillis = now;
-                        player.sendTitle(
-                                ChatColor.RED + "Для возращения войдите в свой первоначальный портал",
-                                "",
-                                5, 50, 10
-                        );
-                    }
+                    sendWrongPortalWarning(player);
                     return;
                 }
 
@@ -2124,7 +2135,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         if (fromWorld == null) return;
 
         if (gameState == GameState.IN_GAME) {
-            // Если спидранер входит в портал из Верхнего мира в Ад — запоминаем его портал в Верхнем мире и в Аду
             if (fromWorld.getEnvironment() == World.Environment.NORMAL) {
                 collectPortalBlocksAround(from, 5, runnerOverworldPortalBlocks);
 
@@ -2142,15 +2152,10 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
                 }
             }
 
-            // Если спидранер пытается вернуться из Ада через другой портал — отменяем телепортацию и показываем Title
             if (fromWorld.getEnvironment() == World.Environment.NETHER) {
                 if (!runnerInitialNetherPortalBlocks.isEmpty() && !isLocationInInitialNetherPortal(from)) {
                     event.setCancelled(true);
-                    player.sendTitle(
-                            ChatColor.RED + "Для возращения войдите в свой первоначальный портал",
-                            "",
-                            5, 50, 10
-                    );
+                    sendWrongPortalWarning(player);
                     return;
                 }
             }
@@ -2167,7 +2172,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
             if (current.getWorld() != null) {
                 lastRunnerLocations.put(current.getWorld().getEnvironment(), current.clone());
 
-                // Фиксируем первоначальный портал в Аду при входе спидранера в Незер
                 if (gameState == GameState.IN_GAME
                         && current.getWorld().getEnvironment() == World.Environment.NETHER
                         && runnerInitialNetherPortalBlocks.isEmpty()) {
@@ -2191,7 +2195,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
             return;
         }
 
-        // Если охотник ломает портал спидранера (в Верхнем мире или в Аду) -> автопобеда спидранера
         if (gameState == GameState.IN_GAME) {
             Player breaker = event.getPlayer();
             if (hunterUuids.contains(breaker.getUniqueId())) {
@@ -2210,7 +2213,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
             return;
         }
 
-        // Если охотник заливает портал спидранера водой или лавой, разрушая его -> автопобеда спидранера
         if (gameState == GameState.IN_GAME) {
             Player player = event.getPlayer();
             if (hunterUuids.contains(player.getUniqueId())) {
@@ -2422,6 +2424,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
 
     private void triggerHuntersWin() {
         if (gameState == GameState.ENDED) return;
+        cancelBorderTransition();
         stopPauseImmediately(true);
         gameState = GameState.ENDED;
         updateSidebarScoreboard();
@@ -2442,6 +2445,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
 
     private void triggerSpeedrunnerWin() {
         if (gameState == GameState.ENDED) return;
+        cancelBorderTransition();
         stopPauseImmediately(true);
         gameState = GameState.ENDED;
         updateSidebarScoreboard();
@@ -2462,6 +2466,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
 
     private void triggerSpeedrunnerWinByPortalBreak(String breakerName) {
         if (gameState == GameState.ENDED) return;
+        cancelBorderTransition();
         stopPauseImmediately(true);
         gameState = GameState.ENDED;
         updateSidebarScoreboard();
@@ -2624,6 +2629,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
 
     private void resetInternalState(boolean resetWorldBorders) {
         cancelCountdown();
+        cancelBorderTransition();
         stopPauseImmediately(true);
         removeWaitingBox();
         resetAllPlayerStates();
@@ -2656,12 +2662,12 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     }
 
     private void resetWorldBorder(World world) {
+        cancelBorderTransition();
         if (world == null) return;
         try {
             WorldBorder border = world.getWorldBorder();
             border.setCenter(0.0, 0.0);
             border.setSize(DEFAULT_MINECRAFT_BORDER);
-            dispatchConsoleCommandSafe("worldborder set 30000000");
         } catch (Throwable ignored) {
         }
     }
@@ -2710,7 +2716,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     }
 
     private void sendFullModInfo(CommandSender sender) {
-        sender.sendMessage(ChatColor.GOLD + "========== Информация о моде Asonsss_manhunt (v1.4.0) ==========");
+        sender.sendMessage(ChatColor.GOLD + "========== Информация о моде Asonsss_manhunt (v1.4.1) ==========");
         sender.sendMessage(ChatColor.AQUA + "Команды администратора:");
         sender.sendMessage(ChatColor.YELLOW + " • /manhunt game start_prepare " + ChatColor.GRAY + "— запустить подготовку, создать комнату ожидания и включить Scoreboard");
         sender.sendMessage(ChatColor.YELLOW + " • /manhunt speedruner add/remove <Игрок> " + ChatColor.GRAY + "— назначить или удалить спидранера");
@@ -2737,7 +2743,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     }
 
     private void sendManhuntHelp(CommandSender sender) {
-        sender.sendMessage(ChatColor.GOLD + "=== Команды Asonsss_manhunt (v1.4.0) ===");
+        sender.sendMessage(ChatColor.GOLD + "=== Команды Asonsss_manhunt (v1.4.1) ===");
         sender.sendMessage(ChatColor.YELLOW + "/manhunt info " + ChatColor.GRAY + "— полное описание всех команд мода");
         sender.sendMessage(ChatColor.YELLOW + "/manhunt difficulty info " + ChatColor.GRAY + "— информация о сложностях");
         sender.sendMessage(ChatColor.YELLOW + "/manhunt game start_prepare " + ChatColor.GRAY + "— начать подготовку к игре");
