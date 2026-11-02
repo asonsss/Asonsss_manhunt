@@ -1,8 +1,8 @@
 name: Asonsss_manhunt
-version: '1.4.1'
+version: '1.4.2'
 main: me.asonsss.manhunt.AsonsssManhunt
 api-version: '1.21'
-description: Manhunt plugin v1.4.1 with exact second-based border transitions, portal chat warning with note sound, and scoreboard
+description: Manhunt plugin v1.4.2 with smooth vanilla worldborder transitions (15s, 1s, 200s), portal lock and scoreboard
 commands:
   manhunt:
     description: Основная команда управления Manhunt
