@@ -3,13 +3,11 @@ package me.asonsss.manhunt;
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
 import org.bukkit.Chunk;
-import org.bukkit.Color;
+import org.bukkit.Effect;
 import org.bukkit.GameMode;
-import org.bukkit.GameRule;
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
-import org.bukkit.Particle;
 import org.bukkit.Registry;
 import org.bukkit.StructureType;
 import org.bukkit.World;
@@ -17,7 +15,6 @@ import org.bukkit.WorldBorder;
 import org.bukkit.WorldCreator;
 import org.bukkit.WorldType;
 import org.bukkit.attribute.AttributeInstance;
-import org.bukkit.block.Biome;
 import org.bukkit.block.Block;
 import org.bukkit.block.BlockFace;
 import org.bukkit.block.BlockState;
@@ -437,7 +434,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     private static final int BOX_MIN_Z = -10;
     private static final int BOX_MAX_Z = 9;
 
-    // Резервный пул проверенных сидов без океана в центре (если случайный перебор превысит лимит попыток)
+    // Резервный пул проверенных сидов без океана в центре
     private static final long[] FALLBACK_LAND_SEEDS = {
             10837491238471L, -491827364519283L, 847261593847162L, 293847561029384L,
             -918273645019283L, 564738291019283L, 738291048576123L, -192837465564738L
@@ -524,7 +521,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         startScoreboardAndTimerTask();
         startReplayRecordingTask();
 
-        // Восстанавливаем сохранённую игру, если она была остановлена через /stop
         loadSavedGameStateIfPresent();
 
         getLogger().info("Asonsss_manhunt v1.5.0 успешно запущен!");
@@ -599,36 +595,31 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
 
     /**
      * Проверяет, нет ли биомов океана в радиусе 200 блоков от (0, 0).
+     * Вызов через рефлексию безопасен для 1.21.3+ / 26.3, где Biome стал интерфейсом.
      */
     private boolean isWorldOceanFreeInRadius200(World world) {
         if (world == null) return false;
         int step = 25;
         int rSq = OCEAN_CHECK_RADIUS * OCEAN_CHECK_RADIUS;
-        for (int x = -OCEAN_CHECK_RADIUS; x <= OCEAN_CHECK_RADIUS; x += step) {
-            for (int z = -OCEAN_CHECK_RADIUS; z <= OCEAN_CHECK_RADIUS; z += step) {
-                if (x * x + z * z > rSq) continue;
-                try {
-                    Biome biome = world.getBiome(x, 64, z);
-                    String biomeName = "";
-                    try {
-                        biomeName = biome.getKey().getKey().toUpperCase(Locale.ROOT);
-                    } catch (Throwable ignored) {
-                        biomeName = biome.toString().toUpperCase(Locale.ROOT);
+        try {
+            Method getBiomeMethod = world.getClass().getMethod("getBiome", int.class, int.class, int.class);
+            for (int x = -OCEAN_CHECK_RADIUS; x <= OCEAN_CHECK_RADIUS; x += step) {
+                for (int z = -OCEAN_CHECK_RADIUS; z <= OCEAN_CHECK_RADIUS; z += step) {
+                    if (x * x + z * z > rSq) continue;
+                    Object biomeObj = getBiomeMethod.invoke(world, x, 64, z);
+                    if (biomeObj != null) {
+                        String biomeName = String.valueOf(biomeObj).toUpperCase(Locale.ROOT);
+                        if (biomeName.contains("OCEAN")) {
+                            return false;
+                        }
                     }
-                    if (biomeName.contains("OCEAN")) {
-                        return false;
-                    }
-                } catch (Throwable ignored) {
                 }
             }
+        } catch (Throwable ignored) {
         }
         return true;
     }
 
-    /**
-     * Создаёт новый мир с фильтрацией сида (без океана в радиусе 200 блоков от 0:0)
-     * и выгружает/удаляет старый временный мир Manhunt.
-     */
     private World createFilteredManhuntWorld(CommandSender notifyTarget) {
         World previousCustomWorld = (activeOverworld != null && activeOverworld.getName().startsWith("manhunt_world_"))
                 ? activeOverworld
@@ -637,7 +628,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         World fallbackWorld = Bukkit.getWorlds().get(0);
         Location tempSafeLoc = fallbackWorld.getSpawnLocation();
 
-        // Если мы пересоздаём кастомный мир, временно переносим игроков в дефолтный мир перед выгрузкой старого
         if (previousCustomWorld != null) {
             for (Player p : Bukkit.getOnlinePlayers()) {
                 if (p.getWorld().equals(previousCustomWorld)) {
@@ -660,7 +650,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
             creator.environment(World.Environment.NORMAL);
             creator.type(WorldType.NORMAL);
             creator.seed(candidateSeed);
-            creator.keepSpawnInMemory(false); // Мгновенная инициализация без генерации 441 чанка спавна
+            creator.keepSpawnInMemory(false);
 
             World candidate = Bukkit.createWorld(creator);
             if (candidate == null) continue;
@@ -709,10 +699,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         dir.delete();
     }
 
-    /**
-     * Команда /sp restart: пересоздаёт мир с новым отфильтрованным сидом во время /sp pickplace start,
-     * сохраняя все роли, охотников, спидранера и выбранную сложность.
-     */
     private void handleSpRestart(Player speedrunner) {
         if (gameState != GameState.PICKING_PLACE) {
             speedrunner.sendMessage(ChatColor.RED + "Команда /sp restart доступна только во время выбора места старта (после /sp pickplace start)!");
@@ -725,11 +711,9 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         waitingBoxBuilt = false;
         World newWorld = createFilteredManhuntWorld(speedrunner);
 
-        // Строим коробку ожидания в новом мире и переносим туда охотников
         Location boxSpawn = buildWaitingBox(newWorld);
         applyPreparationWorldRules(newWorld, boxSpawn);
 
-        // Настраиваем границу зоны выбора места старта и сразу возвращаем спидранера в режим выбора места
         WorldBorder border = newWorld.getWorldBorder();
         border.setCenter(0.0, 0.0);
         border.setSize(selectedDifficulty.getPickPlaceBorderSize());
@@ -789,10 +773,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         }
     }
 
-    /**
-     * Перехватываем /stop во время активной игры, чтобы вместо выключения сервера
-     * срабатывала длительная остановка игры Manhunt.
-     */
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     public void onPlayerCommandPreprocess(PlayerCommandPreprocessEvent event) {
         String msg = event.getMessage().trim().toLowerCase(Locale.ROOT);
@@ -1137,7 +1117,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
             return true;
         }
 
-        // Если шла временная пауза (/pause), аккуратно переводим её в постоянный /stop
         if (pauseTask != null) {
             pauseTask.cancel();
             pauseTask = null;
@@ -1406,14 +1385,12 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
 
         long now = System.currentTimeMillis();
 
-        // 1. Сначала проверяем общий 10-минутный кулдаун от прошлого использования паузы
         if (now < pauseCooldownEndMillis) {
             long remainingSeconds = Math.max(1L, (pauseCooldownEndMillis - now + 999L) / 1000L);
             player.sendMessage(ChatColor.RED + "Команда станет снова доступна через " + formatCooldownTime(remainingSeconds) + ".");
             return true;
         }
 
-        // 2. Если общего КД нет, проверяем 1-минутный запрет после удара между спидранером и охотником
         if (now < combatCooldownEndMillis) {
             long remainingCombatSeconds = Math.max(1L, (combatCooldownEndMillis - now + 999L) / 1000L);
             player.sendMessage(ChatColor.RED + "Команда будет доступна через "
@@ -1576,9 +1553,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         }
     }
 
-    /**
-     * Полное восстановление скорости передвижения и снятие эффекта заморозки (исправляет баг с перезаходом в паузу).
-     */
     private void restorePlayerMovement(Player p) {
         if (p == null) return;
         try {
@@ -1636,7 +1610,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
 
                 ReplayFrame frame = new ReplayFrame();
 
-                // 1. Записываем всех игроков поблизости от спидранера
                 for (Player p : world.getPlayers()) {
                     if (p.getLocation().distanceSquared(center) <= REPLAY_CAPTURE_RADIUS * REPLAY_CAPTURE_RADIUS) {
                         boolean swung = swungHandThisTick.contains(p.getUniqueId());
@@ -1645,13 +1618,11 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
                     }
                 }
 
-                // 2. Записываем все объекты, мобов, снаряды, предметы вокруг спидранера
                 for (Entity ent : world.getNearbyEntities(center, REPLAY_CAPTURE_RADIUS, REPLAY_CAPTURE_RADIUS, REPLAY_CAPTURE_RADIUS)) {
                     if (ent instanceof Player || ent instanceof ArmorStand) continue;
                     frame.entities.add(new EntitySnapshot(ent));
                 }
 
-                // 3. Записываем все изменения блоков за этот тик
                 if (!pendingBlockChangesThisTick.isEmpty()) {
                     frame.blockChanges.addAll(pendingBlockChangesThisTick);
                     pendingBlockChangesThisTick.clear();
@@ -1678,9 +1649,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         }
     }
 
-    /**
-     * Запускает 10-секундный повтор последних действий перед смертью спидранера для всех игроков.
-     */
     private void startDeathReplayAndThenHuntersWin(Location deathLocation) {
         if (gameState == GameState.REPLAYING_DEATH || gameState == GameState.ENDED) return;
         stopPauseImmediately(false);
@@ -1694,7 +1662,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         final List<ReplayFrame> framesToPlay = new ArrayList<>(replayFrames);
         replayFrames.clear();
 
-        // Откатываем все записанные блоки к состоянию 10 секунд назад (в обратном порядке)
+        // Откатываем все записанные блоки к состоянию 10 секунд назад
         for (int i = framesToPlay.size() - 1; i >= 0; i--) {
             ReplayFrame f = framesToPlay.get(i);
             for (int j = f.blockChanges.size() - 1; j >= 0; j--) {
@@ -1706,7 +1674,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
             }
         }
 
-        // Телепортируем всех игроков к точке смерти спидранера в режиме Наблюдателя
         Location spectatorViewLoc = deathLocation.clone().add(0.0, 2.5, 0.0);
         for (Player p : Bukkit.getOnlinePlayers()) {
             p.setGlowing(false);
@@ -1739,7 +1706,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     }
 
     private void renderReplayFrame(ReplayFrame frame) {
-        // 1. Воспроизводим изменения блоков этого кадра
         for (BlockChangeRecord rec : frame.blockChanges) {
             Block b = rec.pos.toBlock();
             if (b != null && rec.afterData != null) {
@@ -1747,7 +1713,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
             }
         }
 
-        // 2. Обновляем визуальных двойников игроков
         Set<UUID> activePlayersInFrame = new HashSet<>();
         for (PlayerSnapshot snap : frame.players) {
             activePlayersInFrame.add(snap.uuid);
@@ -1755,7 +1720,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
             if (stand == null || !stand.isValid()) {
                 World w = snap.location.getWorld();
                 if (w == null) continue;
-                stand = (ArmorStand) w.spawnEntity(snap.location, EntityType.ARMOR_STAND);
+                stand = w.spawn(snap.location, ArmorStand.class);
                 stand.setBasePlate(false);
                 stand.setArms(true);
                 stand.setGravity(false);
@@ -1793,12 +1758,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
                     playSoundSafe(viewer, SOUND_PLAYER_HURT, 1.0f, 1.0f);
                 }
                 try {
-                    snap.location.getWorld().spawnParticle(
-                            Particle.REDSTONE,
-                            snap.location.clone().add(0, 1.0, 0),
-                            12, 0.3, 0.5, 0.3,
-                            new Particle.DustOptions(Color.RED, 1.5f)
-                    );
+                    snap.location.getWorld().playEffect(snap.location.clone().add(0, 1.0, 0), Effect.STEP_SOUND, Material.REDSTONE_BLOCK);
                 } catch (Throwable ignored) {
                 }
             }
@@ -1813,7 +1773,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
             }
         }
 
-        // 3. Обновляем визуальные копии всех мобов, снарядов и предметов
         Set<UUID> activeEntitiesInFrame = new HashSet<>();
         for (EntitySnapshot es : frame.entities) {
             activeEntitiesInFrame.add(es.uuid);
@@ -1822,7 +1781,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
                 World w = es.location.getWorld();
                 if (w == null) continue;
                 try {
-                    if (es.type == EntityType.DROPPED_ITEM && es.droppedItem != null) {
+                    if (es.droppedItem != null) {
                         Item dropped = w.dropItem(es.location, es.droppedItem);
                         dropped.setPickupDelay(Integer.MAX_VALUE);
                         dropped.setGravity(false);
@@ -1911,7 +1870,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
                     }
                 }
 
-                // Гарантируем, что если пауза НЕ активна, ни один игрок не застрял с нулевой скоростью после перезахода
                 if (!gamePaused && !longTermStopped) {
                     for (Player p : Bukkit.getOnlinePlayers()) {
                         if (p.getWalkSpeed() < 0.05f) {
@@ -1923,7 +1881,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
                 if (gameState == GameState.IN_GAME && !gamePaused && !longTermStopped) {
                     elapsedGameSeconds++;
 
-                    // На сложности IMPOSSIBLE через 4 часа спидранер умирает
                     if (selectedDifficulty == DifficultyMode.IMPOSSIBLE
                             && elapsedGameSeconds >= IMPOSSIBLE_TIME_LIMIT_SECONDS) {
                         Player runner = speedrunnerUuid != null ? Bukkit.getPlayer(speedrunnerUuid) : null;
@@ -2096,6 +2053,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         return 64;
     }
 
+    @SuppressWarnings("deprecation")
     private void applyPreparationWorldRules(World overworld, Location boxSpawn) {
         for (World w : Bukkit.getWorlds()) {
             try {
@@ -2132,6 +2090,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         }
     }
 
+    @SuppressWarnings("deprecation")
     private void applyActiveGameWorldRules() {
         PotionEffectType saturationType = resolvePotionEffect("saturation", "SATURATION");
         for (Player p : Bukkit.getOnlinePlayers()) {
@@ -2151,16 +2110,10 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         disableLocatorBarEverywhere();
     }
 
-    /**
-     * Исправление п. 6: Надёжное отключение locatorBar / locator_bar во ВСЕХ измерениях
-     * (Overworld, Nether, The End и кастомных мирах) через API мира, GameRule и execute in <dimension>.
-     */
-    @SuppressWarnings({"deprecation", "unchecked", "rawtypes"})
     private void disableLocatorBarEverywhere() {
         setLocatorBarAllWorlds(false);
     }
 
-    @SuppressWarnings({"deprecation", "unchecked", "rawtypes"})
     private void setLocatorBarAllWorlds(boolean enabled) {
         String valStr = String.valueOf(enabled);
         for (World w : Bukkit.getWorlds()) {
@@ -2176,7 +2129,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         dispatchConsoleCommandSafe("execute in minecraft:the_end run gamerule locator_bar " + valStr);
     }
 
-    @SuppressWarnings({"deprecation", "unchecked", "rawtypes"})
+    @SuppressWarnings("deprecation")
     private void setLocatorBarInWorld(World w, boolean enabled) {
         if (w == null) return;
         String valStr = String.valueOf(enabled);
@@ -2186,16 +2139,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         }
         try {
             w.setGameRuleValue("locator_bar", valStr);
-        } catch (Throwable ignored) {
-        }
-        try {
-            GameRule r1 = GameRule.getByName("locatorBar");
-            if (r1 != null) w.setGameRule(r1, enabled);
-        } catch (Throwable ignored) {
-        }
-        try {
-            GameRule r2 = GameRule.getByName("locator_bar");
-            if (r2 != null) w.setGameRule(r2, enabled);
         } catch (Throwable ignored) {
         }
         try {
@@ -2267,7 +2210,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         elapsedGameSeconds = 0L;
         scoreboardActive = true;
 
-        // Пункт 3: При команде /manhunt game start (или start_prepare) мир сразу подвергается фильтрации (без океана в 200 блоках от 0:0)
         World defaultWorld = getMainOverworld();
         if (isWorldOceanFreeInRadius200(defaultWorld)) {
             activeOverworld = defaultWorld;
@@ -2387,6 +2329,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
                 + "Весь процесс подготовки и настройки игры полностью сброшены администратором.");
     }
 
+    @SuppressWarnings("deprecation")
     private void endGameCleanup(CommandSender sender) {
         cancelCountdown();
         if (replayPlaybackTask != null) {
@@ -2884,10 +2827,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         return name.isEmpty() ? "Эффект" : name;
     }
 
-    // =========================================================================
-    // МЕХАНИКА ПОРТАЛОВ СПИДРАНЕРА (УВЕДОМЛЕНИЕ В ЧАТ + ЗВУК НОТЫ И ЗАЩИТА)
-    // =========================================================================
-
     private void sendWrongPortalWarning(Player player) {
         long now = System.currentTimeMillis();
         if (now - lastWrongPortalWarningMillis > 1200L) {
@@ -3049,7 +2988,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         Location to = event.getTo();
         if (to == null) return;
 
-        // 1. Полный запрет движения во время паузы или /stop
         if (gamePaused || longTermStopped) {
             if (from.getX() != to.getX() || from.getY() != to.getY() || from.getZ() != to.getZ()) {
                 event.setTo(from);
@@ -3057,7 +2995,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
             return;
         }
 
-        // 2. Запрет спидранеру в режиме Наблюдателя вылетать из зоны выбора места спавна (/sp pickplace start)
         if (gameState == GameState.PICKING_PLACE
                 && speedrunnerUuid != null
                 && speedrunnerUuid.equals(player.getUniqueId())
@@ -3080,7 +3017,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
 
         if (gameState != GameState.IN_GAME) return;
 
-        // 3. Логика для спидранера во время активной игры
         if (speedrunnerUuid != null && speedrunnerUuid.equals(player.getUniqueId())) {
             World world = to.getWorld();
             if (world != null) {
@@ -3110,7 +3046,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         World fromWorld = from.getWorld();
         if (fromWorld == null) return;
 
-        // Связывание порталов для кастомных отфильтрованных миров (manhunt_world_...)
         if (event.getCause() == PlayerTeleportEvent.TeleportCause.NETHER_PORTAL) {
             if (fromWorld.getEnvironment() == World.Environment.NORMAL) {
                 World nether = getNetherWorld();
@@ -3178,7 +3113,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         Player player = event.getPlayer();
         World currentWorld = player.getWorld();
 
-        // Гарантируем отключение locatorBar в любом измерении, куда перешёл игрок во время игры
         if (gameState == GameState.IN_GAME) {
             setLocatorBarInWorld(currentWorld, false);
         }
@@ -3358,7 +3292,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     public void onPlayerJoin(PlayerJoinEvent event) {
         Player p = event.getPlayer();
 
-        // Восстанавливаем цвет никнейма и команду (если игрок перезашёл во время игры/стопа)
         if (speedrunnerUuid != null && speedrunnerUuid.equals(p.getUniqueId())) {
             assignPlayerToTeam(p, TEAM_SPEEDRUNNER, ChatColor.RED);
             if (selectedDifficulty != null && (gameState == GameState.IN_GAME || gameState == GameState.WAITING_READY)) {
@@ -3389,7 +3322,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
             return;
         }
 
-        // Исправление п. 7: Если игрок перезашёл и пауза уже закончилась, гарантированно возвращаем ему нормальную ходьбу!
         if (!gamePaused) {
             restorePlayerMovement(p);
         } else {
@@ -3432,7 +3364,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
             event.getDrops().removeIf(this::isHunterCompass);
         }
 
-        // Пункт 4: При смерти спидранера телепортируем всех игроков к точке смерти и показываем 10-секундный повтор
         if (gameState == GameState.IN_GAME && speedrunnerUuid != null && speedrunnerUuid.equals(deceased.getUniqueId())) {
             Location deathLoc = deceased.getLocation().clone();
             Bukkit.getScheduler().runTaskLater(this, () -> startDeathReplayAndThenHuntersWin(deathLoc), 2L);
@@ -3503,13 +3434,11 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         Player p = event.getPlayer();
         UUID uuid = p.getUniqueId();
 
-        // Если игрок выходит во время /stop, запоминаем его точное положение и сохраняем на диск
         if (longTermStopped) {
             frozenLocationsDuringStop.put(uuid, p.getLocation().clone());
             saveGameStateToDisk();
         }
 
-        // Исправление п. 7: Сбрасываем walkSpeed в 0.2f при выходе, чтобы в файле игрока на диске не застрял 0.0f
         p.setWalkSpeed(0.2f);
         p.setFlySpeed(0.1f);
         PotionEffectType slowType = resolvePotionEffect("slowness", "SLOWNESS", "SLOW");
@@ -3752,6 +3681,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         }
     }
 
+    @SuppressWarnings("deprecation")
     private void resetInternalState(boolean resetWorldBorders) {
         cancelCountdown();
         if (replayPlaybackTask != null) {
