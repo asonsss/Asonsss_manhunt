@@ -1,16 +1,16 @@
 name: Asonsss_manhunt
-version: '1.4.2'
+version: '1.5.0'
 main: me.asonsss.manhunt.AsonsssManhunt
 api-version: '1.21'
-description: Manhunt plugin v1.4.2 with smooth vanilla worldborder transitions (15s, 1s, 200s), portal lock and scoreboard
+description: Manhunt plugin v1.5.0 with /sp restart, 200-block ocean seed filter, 10s death replay, /stop & /resume, and cross-dimension locatorBar fix
 commands:
   manhunt:
     description: Основная команда управления Manhunt
     aliases: [speedrun]
     usage: /manhunt <game|speedruner|hunter|difficulty|info> ...
   sp:
-    description: Команды спидранера для настройки сложности и выбора места старта
-    usage: /sp <difficulty|pickplace> ...
+    description: Команды спидранера для настройки сложности, перезапуска мира и выбора места старта
+    usage: /sp <difficulty|pickplace|restart> ...
   ready:
     description: Подтвердить готовность к началу игры
     usage: /ready
@@ -28,3 +28,9 @@ commands:
     description: Получить компас охотника во время игры
     aliases: [c]
     usage: /compass
+  stop:
+    description: Надолго остановить игру Manhunt с сохранением состояния
+    usage: /stop
+  resume:
+    description: Возобновить остановленную игру Manhunt
+    usage: /resume
