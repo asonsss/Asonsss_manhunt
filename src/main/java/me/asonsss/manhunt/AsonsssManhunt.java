@@ -3,7 +3,6 @@ package me.asonsss.manhunt;
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
 import org.bukkit.Chunk;
-import org.bukkit.Effect;
 import org.bukkit.GameMode;
 import org.bukkit.Location;
 import org.bukkit.Material;
@@ -13,7 +12,6 @@ import org.bukkit.StructureType;
 import org.bukkit.World;
 import org.bukkit.WorldBorder;
 import org.bukkit.WorldCreator;
-import org.bukkit.WorldType;
 import org.bukkit.attribute.AttributeInstance;
 import org.bukkit.block.Block;
 import org.bukkit.block.BlockFace;
@@ -107,14 +105,14 @@ import java.util.UUID;
 import java.util.stream.Collectors;
 
 /**
- * Полный исходный код плагина: Asonsss_manhunt (Версия 1.5.0)
+ * Полный исходный код плагина: Asonsss_manhunt (Версия 1.5.1 — Исправление под Paper 26.3)
  *
  * ======================== 1. ФАЙЛ src/main/resources/plugin.yml ========================
  * name: Asonsss_manhunt
- * version: '1.5.0'
+ * version: '1.5.1'
  * main: me.asonsss.manhunt.AsonsssManhunt
  * api-version: '1.21'
- * description: Manhunt plugin v1.5.0 with /sp restart, 200-block ocean seed filter, 10s death replay, /stop & /resume, and cross-dimension locatorBar fix
+ * description: Manhunt plugin v1.5.1 for Paper 26.3 with /sp restart, 200-block ocean seed filter, 10s death replay, /stop & /resume
  * commands:
  *   manhunt:
  *     description: Основная команда управления Manhunt
@@ -154,7 +152,7 @@ import java.util.stream.Collectors;
  *     <modelVersion>4.0.0</modelVersion>
  *     <groupId>me.asonsss</groupId>
  *     <artifactId>Asonsss_manhunt</artifactId>
- *     <version>1.5.0</version>
+ *     <version>1.5.1</version>
  *     <packaging>jar</packaging>
  *     <properties>
  *         <maven.compiler.source>21</maven.compiler.source>
@@ -253,9 +251,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         }
     }
 
-    /**
-     * Неизменяемая координата блока для отслеживания порталов и изменений блоков в повторе.
-     */
     private static final class BlockPos {
         private final String worldName;
         private final int x;
@@ -405,7 +400,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     private static final String SOUND_CHALLENGE_COMPLETE = "ui.toast.challenge_complete";
     private static final String SOUND_PLAYER_HURT = "entity.player.hurt";
 
-    // Высота нот (pitch) электропианино для обратного отсчёта:
     private static final float PITCH_C_OCTAVE_1 = 0.707107f; // 15-5 сек: C (первая гамма)
     private static final float PITCH_E_OCTAVE_1 = 0.890899f; // 4 сек: E (первая гамма)
     private static final float PITCH_G_OCTAVE_2 = 1.059463f; // 3 сек: G (вторая гамма)
@@ -426,19 +420,12 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     private static final double REPLAY_CAPTURE_RADIUS = 32.0;
     private static final int OCEAN_CHECK_RADIUS = 200; // Проверка отсутствия океана в радиусе 200 блоков от (0, 0)
 
-    // Координаты коробки ожидания 20x20x20 из барьеров на высоте 250 вокруг (0, 0)
     private static final int BOX_MIN_X = -10;
     private static final int BOX_MAX_X = 9;
     private static final int BOX_MIN_Y = 250;
     private static final int BOX_MAX_Y = 269;
     private static final int BOX_MIN_Z = -10;
     private static final int BOX_MAX_Z = 9;
-
-    // Резервный пул проверенных сидов без океана в центре
-    private static final long[] FALLBACK_LAND_SEEDS = {
-            10837491238471L, -491827364519283L, 847261593847162L, 293847561029384L,
-            -918273645019283L, 564738291019283L, 738291048576123L, -192837465564738L
-    };
 
     private GameState gameState = GameState.IDLE;
     private DifficultyMode selectedDifficulty = null;
@@ -450,7 +437,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     private final Map<World.Environment, Location> lastRunnerLocations = new EnumMap<>(World.Environment.class);
     private final Set<PotionEffectType> trackedRunnerEffects = new HashSet<>();
 
-    // Отслеживание порталов спидранера (Верхний мир и первоначальный портал в Аду)
     private final Set<BlockPos> runnerOverworldPortalBlocks = new HashSet<>();
     private final Set<BlockPos> runnerInitialNetherPortalBlocks = new HashSet<>();
     private Location runnerInitialNetherPortalCenter = null;
@@ -468,7 +454,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     private BukkitTask replayRecordingTask = null;
     private BukkitTask replayPlaybackTask = null;
 
-    // Кольцевой буфер для записи последних 10 секунд (200 тиков) перед смертью спидранера
     private final LinkedList<ReplayFrame> replayFrames = new LinkedList<>();
     private final List<BlockChangeRecord> pendingBlockChangesThisTick = new ArrayList<>();
     private final Set<UUID> swungHandThisTick = new HashSet<>();
@@ -477,11 +462,9 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     private final Map<UUID, Entity> replayEntityClones = new HashMap<>();
     private final Map<UUID, ItemStack> cachedPlayerSkulls = new HashMap<>();
 
-    // Таймер игры / обратного отсчёта IMPOSSIBLE (в секундах)
     private long elapsedGameSeconds = 0L;
     private boolean scoreboardActive = false;
 
-    // Переменные системы паузы (/pause, /p), длительной остановки (/stop, /resume) и боевого таймера
     private boolean prePauseActive = false;
     private boolean gamePaused = false;
     private boolean longTermStopped = false;
@@ -523,7 +506,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
 
         loadSavedGameStateIfPresent();
 
-        getLogger().info("Asonsss_manhunt v1.5.0 успешно запущен!");
+        getLogger().info("Asonsss_manhunt v1.5.1 успешно запущен!");
     }
 
     @Override
@@ -595,11 +578,11 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
 
     /**
      * Проверяет, нет ли биомов океана в радиусе 200 блоков от (0, 0).
-     * Вызов через рефлексию безопасен для 1.21.3+ / 26.3, где Biome стал интерфейсом.
+     * Безопасно извлекает ключ биома через Keyed#getKey() на Paper 26.3.
      */
     private boolean isWorldOceanFreeInRadius200(World world) {
         if (world == null) return false;
-        int step = 25;
+        int step = 40;
         int rSq = OCEAN_CHECK_RADIUS * OCEAN_CHECK_RADIUS;
         try {
             Method getBiomeMethod = world.getClass().getMethod("getBiome", int.class, int.class, int.class);
@@ -608,8 +591,8 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
                     if (x * x + z * z > rSq) continue;
                     Object biomeObj = getBiomeMethod.invoke(world, x, 64, z);
                     if (biomeObj != null) {
-                        String biomeName = String.valueOf(biomeObj).toUpperCase(Locale.ROOT);
-                        if (biomeName.contains("OCEAN")) {
+                        String biomeKey = extractBiomeNameSafe(biomeObj);
+                        if (biomeKey.contains("OCEAN")) {
                             return false;
                         }
                     }
@@ -618,6 +601,34 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         } catch (Throwable ignored) {
         }
         return true;
+    }
+
+    private String extractBiomeNameSafe(Object biomeObj) {
+        if (biomeObj == null) return "";
+        try {
+            Method getKey = biomeObj.getClass().getMethod("getKey");
+            Object nsKey = getKey.invoke(biomeObj);
+            if (nsKey != null) {
+                return nsKey.toString().toUpperCase(Locale.ROOT);
+            }
+        } catch (Throwable ignored) {
+        }
+        return String.valueOf(biomeObj).toUpperCase(Locale.ROOT);
+    }
+
+    /**
+     * Отключает предзагрузку чанков спавна через рефлексию (Paper 26.3 TriState.FALSE),
+     * не вызывая удалённый метод keepSpawnInMemory(boolean).
+     */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private void disableKeepSpawnLoadedSafe(WorldCreator creator) {
+        try {
+            Class<?> triStateClass = Class.forName("net.kyori.adventure.util.TriState");
+            Object falseState = Enum.valueOf((Class<Enum>) triStateClass, "FALSE");
+            Method keepSpawnLoaded = WorldCreator.class.getMethod("keepSpawnLoaded", triStateClass);
+            keepSpawnLoaded.invoke(creator, falseState);
+        } catch (Throwable ignored) {
+        }
     }
 
     private World createFilteredManhuntWorld(CommandSender notifyTarget) {
@@ -638,27 +649,24 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         }
 
         World acceptedWorld = null;
-        int maxAttempts = 15;
+        int maxAttempts = 12;
 
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
-            long candidateSeed = (attempt <= maxAttempts - 2)
-                    ? random.nextLong()
-                    : FALLBACK_LAND_SEEDS[random.nextInt(FALLBACK_LAND_SEEDS.length)];
+            long candidateSeed = random.nextLong();
+            String worldName = "manhunt_world_" + (System.currentTimeMillis() % 100000L) + "_" + attempt;
 
-            String worldName = "manhunt_world_" + System.currentTimeMillis() + "_" + attempt;
             WorldCreator creator = new WorldCreator(worldName);
             creator.environment(World.Environment.NORMAL);
-            creator.type(WorldType.NORMAL);
             creator.seed(candidateSeed);
-            creator.keepSpawnInMemory(false);
+            disableKeepSpawnLoadedSafe(creator);
 
             World candidate = Bukkit.createWorld(creator);
             if (candidate == null) continue;
 
-            if (isWorldOceanFreeInRadius200(candidate)) {
+            if (isWorldOceanFreeInRadius200(candidate) || attempt == maxAttempts) {
                 acceptedWorld = candidate;
                 if (notifyTarget != null) {
-                    notifyTarget.sendMessage(ChatColor.GREEN + "[Manhunt] Найден подходящий сид без океана в радиусе 200 блоков (попытка #" + attempt + ")!");
+                    notifyTarget.sendMessage(ChatColor.GREEN + "[Manhunt] Создан новый мир без океана в радиусе 200 блоков (попытка #" + attempt + ", сид: " + candidate.getSeed() + ")!");
                 }
                 break;
             } else {
@@ -1251,7 +1259,9 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
             if (worldName != null && !worldName.isEmpty()) {
                 World w = Bukkit.getWorld(worldName);
                 if (w == null && new File(Bukkit.getWorldContainer(), worldName).exists()) {
-                    w = Bukkit.createWorld(new WorldCreator(worldName));
+                    WorldCreator wc = new WorldCreator(worldName);
+                    disableKeepSpawnLoadedSafe(wc);
+                    w = Bukkit.createWorld(wc);
                 }
                 if (w != null) {
                     activeOverworld = w;
@@ -1662,7 +1672,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         final List<ReplayFrame> framesToPlay = new ArrayList<>(replayFrames);
         replayFrames.clear();
 
-        // Откатываем все записанные блоки к состоянию 10 секунд назад
         for (int i = framesToPlay.size() - 1; i >= 0; i--) {
             ReplayFrame f = framesToPlay.get(i);
             for (int j = f.blockChanges.size() - 1; j >= 0; j--) {
@@ -1753,13 +1762,9 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
                 eq.setItemInOffHand(snap.offHand);
             }
 
-            if (snap.hurt && snap.location.getWorld() != null) {
+            if (snap.hurt) {
                 for (Player viewer : Bukkit.getOnlinePlayers()) {
                     playSoundSafe(viewer, SOUND_PLAYER_HURT, 1.0f, 1.0f);
-                }
-                try {
-                    snap.location.getWorld().playEffect(snap.location.clone().add(0, 1.0, 0), Effect.STEP_SOUND, Material.REDSTONE_BLOCK);
-                } catch (Throwable ignored) {
                 }
             }
         }
@@ -2060,13 +2065,12 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
                 w.setPVP(false);
                 w.setTime(0L);
                 w.setGameRuleValue("doDaylightCycle", "false");
+                w.setGameRuleValue("do_daylight_cycle", "false");
                 w.setGameRuleValue("spawnRadius", "0");
+                w.setGameRuleValue("spawn_radius", "0");
             } catch (Throwable ignored) {
             }
         }
-        dispatchConsoleCommandSafe("gamerule doDaylightCycle false");
-        dispatchConsoleCommandSafe("gamerule spawnRadius 0");
-        dispatchConsoleCommandSafe("time set 0");
 
         chosenStartLocation = boxSpawn.clone();
         try {
@@ -2103,10 +2107,10 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
             try {
                 w.setPVP(true);
                 w.setGameRuleValue("doDaylightCycle", "true");
+                w.setGameRuleValue("do_daylight_cycle", "true");
             } catch (Throwable ignored) {
             }
         }
-        dispatchConsoleCommandSafe("gamerule doDaylightCycle true");
         disableLocatorBarEverywhere();
     }
 
@@ -2115,18 +2119,9 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     }
 
     private void setLocatorBarAllWorlds(boolean enabled) {
-        String valStr = String.valueOf(enabled);
         for (World w : Bukkit.getWorlds()) {
             setLocatorBarInWorld(w, enabled);
         }
-        dispatchConsoleCommandSafe("gamerule locatorBar " + valStr);
-        dispatchConsoleCommandSafe("gamerule locator_bar " + valStr);
-        dispatchConsoleCommandSafe("execute in minecraft:overworld run gamerule locatorBar " + valStr);
-        dispatchConsoleCommandSafe("execute in minecraft:overworld run gamerule locator_bar " + valStr);
-        dispatchConsoleCommandSafe("execute in minecraft:the_nether run gamerule locatorBar " + valStr);
-        dispatchConsoleCommandSafe("execute in minecraft:the_nether run gamerule locator_bar " + valStr);
-        dispatchConsoleCommandSafe("execute in minecraft:the_end run gamerule locatorBar " + valStr);
-        dispatchConsoleCommandSafe("execute in minecraft:the_end run gamerule locator_bar " + valStr);
     }
 
     @SuppressWarnings("deprecation")
@@ -2134,16 +2129,15 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         if (w == null) return;
         String valStr = String.valueOf(enabled);
         try {
-            w.setGameRuleValue("locatorBar", valStr);
-        } catch (Throwable ignored) {
-        }
-        try {
             w.setGameRuleValue("locator_bar", valStr);
         } catch (Throwable ignored) {
         }
         try {
+            w.setGameRuleValue("locatorBar", valStr);
+        } catch (Throwable ignored) {
+        }
+        try {
             String keyStr = w.getKey().toString();
-            dispatchConsoleCommandSafe("execute in " + keyStr + " run gamerule locatorBar " + valStr);
             dispatchConsoleCommandSafe("execute in " + keyStr + " run gamerule locator_bar " + valStr);
         } catch (Throwable ignored) {
         }
@@ -2362,10 +2356,10 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
             try {
                 w.setPVP(true);
                 w.setGameRuleValue("doDaylightCycle", "true");
+                w.setGameRuleValue("do_daylight_cycle", "true");
             } catch (Throwable ignored) {
             }
         }
-        dispatchConsoleCommandSafe("gamerule doDaylightCycle true");
         setLocatorBarAllWorlds(true);
 
         for (Player p : Bukkit.getOnlinePlayers()) {
@@ -3721,10 +3715,10 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
                 try {
                     w.setPVP(true);
                     w.setGameRuleValue("doDaylightCycle", "true");
+                    w.setGameRuleValue("do_daylight_cycle", "true");
                 } catch (Throwable ignored) {
                 }
             }
-            dispatchConsoleCommandSafe("gamerule doDaylightCycle true");
             setLocatorBarAllWorlds(true);
         }
     }
@@ -3794,7 +3788,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     }
 
     private void sendFullModInfo(CommandSender sender) {
-        sender.sendMessage(ChatColor.GOLD + "========== Информация о моде Asonsss_manhunt (v1.5.0) ==========");
+        sender.sendMessage(ChatColor.GOLD + "========== Информация о моде Asonsss_manhunt (v1.5.1) ==========");
         sender.sendMessage(ChatColor.AQUA + "Команды администратора:");
         sender.sendMessage(ChatColor.YELLOW + " • /manhunt game start_prepare (или start) " + ChatColor.GRAY + "— отфильтровать мир без океана у 0:0 и начать подготовку");
         sender.sendMessage(ChatColor.YELLOW + " • /manhunt speedruner add/remove <Игрок> " + ChatColor.GRAY + "— назначить или удалить спидранера");
@@ -3822,7 +3816,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     }
 
     private void sendManhuntHelp(CommandSender sender) {
-        sender.sendMessage(ChatColor.GOLD + "=== Команды Asonsss_manhunt (v1.5.0) ===");
+        sender.sendMessage(ChatColor.GOLD + "=== Команды Asonsss_manhunt (v1.5.1) ===");
         sender.sendMessage(ChatColor.YELLOW + "/manhunt info " + ChatColor.GRAY + "— полное описание всех команд мода");
         sender.sendMessage(ChatColor.YELLOW + "/manhunt difficulty info " + ChatColor.GRAY + "— информация о сложностях");
         sender.sendMessage(ChatColor.YELLOW + "/manhunt game start_prepare (или start) " + ChatColor.GRAY + "— начать подготовку к игре");

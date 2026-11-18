@@ -1,36 +1,38 @@
 name: Asonsss_manhunt
-version: '1.5.0'
+version: '1.5.1'
 main: me.asonsss.manhunt.AsonsssManhunt
 api-version: '1.21'
-description: Manhunt plugin v1.5.0 with /sp restart, 200-block ocean seed filter, 10s death replay, /stop & /resume, and cross-dimension locatorBar fix
+authors: [Asonsss]
+description: Custom Manhunt plugin v1.5.1 (Seed Filter, /sp restart, 10s Death Replay, /stop & /resume, Paper 26.3 WorldCreator fix)
+
 commands:
   manhunt:
     description: Основная команда управления Manhunt
+    usage: /<command> <speedruner|hunter|game|difficulty|info>
     aliases: [speedrun]
-    usage: /manhunt <game|speedruner|hunter|difficulty|info> ...
   sp:
-    description: Команды спидранера для настройки сложности, перезапуска мира и выбора места старта
-    usage: /sp <difficulty|pickplace|restart> ...
+    description: Команда настройки игры для Спидранера
+    usage: /<command> <difficulty|pickplace|restart>
   ready:
     description: Подтвердить готовность к началу игры
-    usage: /ready
+    usage: /<command>
   unready:
     description: Отменить готовность к началу игры
-    usage: /unready
-  fortrest:
-    description: Найти ближайшую крепость Незера (только для спидранера на сложности Easy)
-    usage: /fortrest
+    usage: /<command>
   pause:
     description: Поставить игру на паузу (до 180 секунд)
+    usage: /<command> <Время в секундах>
     aliases: [p]
-    usage: /pause <секунды>
-  compass:
-    description: Получить компас охотника во время игры
-    aliases: [c]
-    usage: /compass
   stop:
-    description: Надолго остановить игру Manhunt с сохранением состояния
-    usage: /stop
+    description: Остановить игру на неопределённый срок (с сохранением состояния на диск)
+    usage: /<command>
   resume:
-    description: Возобновить остановленную игру Manhunt
-    usage: /resume
+    description: Возобновить игру после команды /stop
+    usage: /<command>
+  fortrest:
+    description: Показать координаты ближайшей Адской Крепости (только на Легкой сложности в Аду)
+    usage: /<command>
+  compass:
+    description: Получить Компас Охотника (только для охотников во время игры)
+    usage: /<command>
+    aliases: [c]
