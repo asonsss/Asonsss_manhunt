@@ -35,6 +35,7 @@ import org.bukkit.entity.Item;
 import org.bukkit.entity.LivingEntity;
 import org.bukkit.entity.Mob;
 import org.bukkit.entity.Player;
+import org.bukkit.entity.Pose;
 import org.bukkit.entity.Projectile;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
@@ -58,6 +59,7 @@ import org.bukkit.event.player.PlayerCommandPreprocessEvent;
 import org.bukkit.event.player.PlayerDropItemEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
+import org.bukkit.event.player.PlayerKickEvent;
 import org.bukkit.event.player.PlayerMoveEvent;
 import org.bukkit.event.player.PlayerPortalEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
@@ -105,14 +107,14 @@ import java.util.UUID;
 import java.util.stream.Collectors;
 
 /**
- * Полный исходный код плагина: Asonsss_manhunt (Версия 1.5.1 — Исправление под Paper 26.3)
+ * Полный исходный код плагина: Asonsss_manhunt (Версия 1.5.2 — Исправление под Paper 26.3)
  *
  * ======================== 1. ФАЙЛ src/main/resources/plugin.yml ========================
  * name: Asonsss_manhunt
- * version: '1.5.1'
+ * version: '1.5.2'
  * main: me.asonsss.manhunt.AsonsssManhunt
  * api-version: '1.21'
- * description: Manhunt plugin v1.5.1 for Paper 26.3 with /sp restart, 200-block ocean seed filter, 10s death replay, /stop & /resume
+ * description: Manhunt plugin v1.5.2 for Paper 26.3 with /sp restart, 200-block ocean seed filter, 10s death replay, /stop & /resume
  * commands:
  *   manhunt:
  *     description: Основная команда управления Manhunt
@@ -152,7 +154,7 @@ import java.util.stream.Collectors;
  *     <modelVersion>4.0.0</modelVersion>
  *     <groupId>me.asonsss</groupId>
  *     <artifactId>Asonsss_manhunt</artifactId>
- *     <version>1.5.1</version>
+ *     <version>1.5.2</version>
  *     <packaging>jar</packaging>
  *     <properties>
  *         <maven.compiler.source>21</maven.compiler.source>
@@ -312,6 +314,8 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         final String displayName;
         final Location location;
         final boolean sneaking;
+        final Pose pose;
+        final Object playerProfile;
         final boolean swungHand;
         final boolean hurt;
         final ItemStack helmet;
@@ -327,6 +331,13 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
             this.displayName = p.getDisplayName();
             this.location = p.getLocation().clone();
             this.sneaking = p.isSneaking();
+            this.pose = p.getPose();
+            Object prof = null;
+            try {
+                prof = p.getClass().getMethod("getPlayerProfile").invoke(p);
+            } catch (Throwable ignored) {
+            }
+            this.playerProfile = prof;
             this.swungHand = swungHand;
             this.hurt = hurt;
             EntityEquipment eq = p.getEquipment();
@@ -458,9 +469,12 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     private final List<BlockChangeRecord> pendingBlockChangesThisTick = new ArrayList<>();
     private final Set<UUID> swungHandThisTick = new HashSet<>();
     private final Set<UUID> hurtThisTick = new HashSet<>();
-    private final Map<UUID, ArmorStand> replayPlayerClones = new HashMap<>();
+    private final Map<UUID, LivingEntity> replayPlayerClones = new HashMap<>();
     private final Map<UUID, Entity> replayEntityClones = new HashMap<>();
     private final Map<UUID, ItemStack> cachedPlayerSkulls = new HashMap<>();
+    private final Set<String> replayTeamEntries = new HashSet<>();
+    private boolean huntersWinAnnouncedThisGame = false;
+    private Location lastReplaySpectatorLoc = null;
 
     private long elapsedGameSeconds = 0L;
     private boolean scoreboardActive = false;
@@ -506,7 +520,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
 
         loadSavedGameStateIfPresent();
 
-        getLogger().info("Asonsss_manhunt v1.5.1 успешно запущен!");
+        getLogger().info("Asonsss_manhunt v1.5.2 успешно запущен!");
     }
 
     @Override
@@ -666,7 +680,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
             if (isWorldOceanFreeInRadius200(candidate) || attempt == maxAttempts) {
                 acceptedWorld = candidate;
                 if (notifyTarget != null) {
-                    notifyTarget.sendMessage(ChatColor.GREEN + "[Manhunt] Создан новый мир без океана в радиусе 200 блоков (попытка #" + attempt + ", сид: " + candidate.getSeed() + ")!");
+                    notifyTarget.sendMessage(ChatColor.GREEN + "[Manhunt] Создан новый мир без океана в радиусе 200 блоков!");
                 }
                 break;
             } else {
@@ -714,7 +728,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         }
 
         Bukkit.broadcastMessage(ChatColor.GOLD + "[Manhunt] " + ChatColor.RED + speedrunner.getName()
-                + ChatColor.YELLOW + " запустил пересоздание мира (/sp restart). Ищем новый сид без океана...");
+                + ChatColor.YELLOW + " запустил пересоздание мира (/sp restart). Ищем новый мир без океана...");
 
         waitingBoxBuilt = false;
         World newWorld = createFilteredManhuntWorld(speedrunner);
@@ -739,7 +753,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         updateSidebarScoreboard();
 
         Bukkit.broadcastMessage(ChatColor.GOLD + "[Manhunt] " + ChatColor.GREEN
-                + "Новый мир успешно создан (Сид: " + newWorld.getSeed() + ")! Спидранер продолжает выбор места старта.");
+                + "Новый мир успешно создан! Спидранер продолжает выбор места старта.");
     }
 
     // =========================================================================
@@ -783,8 +797,22 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     public void onPlayerCommandPreprocess(PlayerCommandPreprocessEvent event) {
-        String msg = event.getMessage().trim().toLowerCase(Locale.ROOT);
-        if (msg.equals("/stop") || msg.startsWith("/stop ")) {
+        String msg = event.getMessage().trim();
+        String lower = msg.toLowerCase(Locale.ROOT);
+        String firstToken = lower.split("\\s+")[0];
+        if (firstToken.startsWith("/")) {
+            firstToken = firstToken.substring(1);
+        }
+        int colonIdx = firstToken.indexOf(':');
+        String baseCmd = colonIdx >= 0 ? firstToken.substring(colonIdx + 1) : firstToken;
+
+        if (baseCmd.equals("seed") && gameState != GameState.IDLE) {
+            event.setCancelled(true);
+            event.getPlayer().sendMessage(ChatColor.RED + "Команда /seed запрещена во время Manhunt!");
+            return;
+        }
+
+        if (baseCmd.equals("stop")) {
             if (gameState == GameState.IN_GAME) {
                 event.setCancelled(true);
                 handleLongStopCommand(event.getPlayer());
@@ -928,7 +956,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
             player.sendMessage(ChatColor.YELLOW + "Доступные команды спидранера (в строгой последовательности):");
             player.sendMessage(ChatColor.GRAY + "1. /sp difficulty select <easy|medium|hard|impossible>");
             player.sendMessage(ChatColor.GRAY + "2. /sp pickplace start");
-            player.sendMessage(ChatColor.GRAY + "   • /sp restart — пересоздать мир с новым сидом во время выбора места");
+            player.sendMessage(ChatColor.GRAY + "   • /sp restart — пересоздать мир во время выбора места");
             player.sendMessage(ChatColor.GRAY + "3. /sp pickplace end");
             return true;
         }
@@ -1144,6 +1172,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         frozenLocationsDuringStop.clear();
         for (Player p : Bukkit.getOnlinePlayers()) {
             frozenLocationsDuringStop.put(p.getUniqueId(), p.getLocation().clone());
+            freezePlayerInPlaceSafely(p);
         }
 
         if (stopBossBar != null) {
@@ -1522,8 +1551,21 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
             if (slowType != null) {
                 p.addPotionEffect(new PotionEffect(slowType, ticks, 250, false, false, false));
             }
+            freezePlayerInPlaceSafely(p);
+        }
+    }
+
+    private void freezePlayerInPlaceSafely(Player p) {
+        if (p == null) return;
+        try {
             p.setWalkSpeed(0.0f);
             p.setFlySpeed(0.0f);
+            p.setFallDistance(0.0f);
+            p.setVelocity(new Vector(0, 0, 0));
+            // Разрешаем полёт и включаем зависание, чтобы сервер не кикал игроков в воздухе за "Flying is not enabled"
+            p.setAllowFlight(true);
+            p.setFlying(true);
+        } catch (Throwable ignored) {
         }
     }
 
@@ -1568,6 +1610,11 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         try {
             p.setWalkSpeed(0.2f);
             p.setFlySpeed(0.1f);
+            p.setFallDistance(0.0f);
+            if (p.getGameMode() == GameMode.SURVIVAL || p.getGameMode() == GameMode.ADVENTURE) {
+                p.setFlying(false);
+                p.setAllowFlight(false);
+            }
             PotionEffectType slowType = resolvePotionEffect("slowness", "SLOWNESS", "SLOW");
             if (slowType != null) {
                 PotionEffect activeSlow = p.getPotionEffect(slowType);
@@ -1629,7 +1676,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
                 }
 
                 for (Entity ent : world.getNearbyEntities(center, REPLAY_CAPTURE_RADIUS, REPLAY_CAPTURE_RADIUS, REPLAY_CAPTURE_RADIUS)) {
-                    if (ent instanceof Player || ent instanceof ArmorStand) continue;
+                    if (ent instanceof Player || ent instanceof ArmorStand || isMannequinEntity(ent)) continue;
                     frame.entities.add(new EntitySnapshot(ent));
                 }
 
@@ -1672,6 +1719,61 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         final List<ReplayFrame> framesToPlay = new ArrayList<>(replayFrames);
         replayFrames.clear();
 
+        rollbackReplayBlocks(framesToPlay);
+
+        Location spectatorViewLoc = deathLocation.clone().add(0.0, 2.5, 0.0);
+        lastReplaySpectatorLoc = spectatorViewLoc;
+        for (Player p : Bukkit.getOnlinePlayers()) {
+            p.setGlowing(false);
+            restorePlayerMovement(p);
+            p.setGameMode(GameMode.SPECTATOR);
+            p.teleport(spectatorViewLoc);
+            p.sendTitle(ChatColor.RED + "ПОВТОР СМЕРТИ", ChatColor.YELLOW + "Последние 10 секунд перед гибелью спидранера", 5, 45, 10);
+        }
+        Bukkit.broadcastMessage(ChatColor.GOLD + "[Manhunt] " + ChatColor.AQUA
+                + "Воспроизведение зацикленного повтора последних 10 секунд перед смертью спидранера...");
+        Bukkit.broadcastMessage(ChatColor.GRAY + "Повтор будет крутиться до ввода команды /manhunt game end.");
+
+        cleanupReplayEntities();
+
+        replayPlaybackTask = new BukkitRunnable() {
+            int frameIndex = 0;
+            int pauseBetweenLoopsTicks = 0;
+
+            @Override
+            public void run() {
+                if (gameState != GameState.REPLAYING_DEATH) {
+                    this.cancel();
+                    replayPlaybackTask = null;
+                    cleanupReplayEntities();
+                    return;
+                }
+
+                if (pauseBetweenLoopsTicks > 0) {
+                    pauseBetweenLoopsTicks--;
+                    if (pauseBetweenLoopsTicks == 0) {
+                        cleanupReplayEntities();
+                        rollbackReplayBlocks(framesToPlay);
+                        frameIndex = 0;
+                    }
+                    return;
+                }
+
+                if (frameIndex >= framesToPlay.size()) {
+                    // Показываем надпись "Hunters Wins!!" ровно один раз за игру
+                    announceHuntersWinOnce();
+                    // Пауза 1.5 секунды в финальном кадре перед следующим циклом повтора
+                    pauseBetweenLoopsTicks = 30;
+                    return;
+                }
+
+                ReplayFrame frame = framesToPlay.get(frameIndex++);
+                renderReplayFrame(frame);
+            }
+        }.runTaskTimer(this, 1L, 1L);
+    }
+
+    private void rollbackReplayBlocks(List<ReplayFrame> framesToPlay) {
         for (int i = framesToPlay.size() - 1; i >= 0; i--) {
             ReplayFrame f = framesToPlay.get(i);
             for (int j = f.blockChanges.size() - 1; j >= 0; j--) {
@@ -1682,36 +1784,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
                 }
             }
         }
-
-        Location spectatorViewLoc = deathLocation.clone().add(0.0, 2.5, 0.0);
-        for (Player p : Bukkit.getOnlinePlayers()) {
-            p.setGlowing(false);
-            p.setGameMode(GameMode.SPECTATOR);
-            p.teleport(spectatorViewLoc);
-            p.sendTitle(ChatColor.RED + "ПОВТОР СМЕРТИ", ChatColor.YELLOW + "Последние 10 секунд перед гибелью спидранера", 5, 45, 10);
-        }
-        Bukkit.broadcastMessage(ChatColor.GOLD + "[Manhunt] " + ChatColor.AQUA
-                + "Воспроизведение повтора последних 10 секунд перед смертью спидранера...");
-
-        cleanupReplayEntities();
-
-        replayPlaybackTask = new BukkitRunnable() {
-            int frameIndex = 0;
-
-            @Override
-            public void run() {
-                if (frameIndex >= framesToPlay.size() || gameState != GameState.REPLAYING_DEATH) {
-                    this.cancel();
-                    replayPlaybackTask = null;
-                    cleanupReplayEntities();
-                    triggerHuntersWinFinal();
-                    return;
-                }
-
-                ReplayFrame frame = framesToPlay.get(frameIndex++);
-                renderReplayFrame(frame);
-            }
-        }.runTaskTimer(this, 1L, 1L);
     }
 
     private void renderReplayFrame(ReplayFrame frame) {
@@ -1725,35 +1797,49 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         Set<UUID> activePlayersInFrame = new HashSet<>();
         for (PlayerSnapshot snap : frame.players) {
             activePlayersInFrame.add(snap.uuid);
-            ArmorStand stand = replayPlayerClones.get(snap.uuid);
-            if (stand == null || !stand.isValid()) {
+            LivingEntity clone = replayPlayerClones.get(snap.uuid);
+            if (clone == null || !clone.isValid()) {
                 World w = snap.location.getWorld();
                 if (w == null) continue;
-                stand = w.spawn(snap.location, ArmorStand.class);
-                stand.setBasePlate(false);
-                stand.setArms(true);
-                stand.setGravity(false);
-                stand.setInvulnerable(true);
-                stand.setCustomName(snap.displayName);
-                stand.setCustomNameVisible(true);
-                replayPlayerClones.put(snap.uuid, stand);
+                clone = spawnReplayMannequinOrFallback(w, snap);
+                if (clone == null) continue;
+                replayPlayerClones.put(snap.uuid, clone);
             } else {
-                stand.teleport(snap.location);
+                clone.teleport(snap.location);
+                try {
+                    clone.setRotation(snap.location.getYaw(), snap.location.getPitch());
+                } catch (Throwable ignored) {
+                }
             }
 
-            stand.setHeadPose(new EulerAngle(Math.toRadians(snap.location.getPitch()), 0, 0));
-            if (snap.swungHand) {
-                stand.setRightArmPose(new EulerAngle(Math.toRadians(-75), 0, 0));
-            } else {
-                stand.setRightArmPose(new EulerAngle(Math.toRadians(-15), 0, 0));
-            }
-
-            EntityEquipment eq = stand.getEquipment();
-            if (eq != null) {
-                if (snap.helmet != null && snap.helmet.getType() != Material.AIR) {
-                    eq.setHelmet(snap.helmet);
+            if (clone instanceof ArmorStand) {
+                ArmorStand stand = (ArmorStand) clone;
+                stand.setHeadPose(new EulerAngle(Math.toRadians(snap.location.getPitch()), 0, 0));
+                if (snap.swungHand) {
+                    stand.setRightArmPose(new EulerAngle(Math.toRadians(-75), 0, 0));
                 } else {
-                    eq.setHelmet(getOrCreatePlayerSkull(snap.uuid, snap.name));
+                    stand.setRightArmPose(new EulerAngle(Math.toRadians(-15), 0, 0));
+                }
+            } else {
+                applyMannequinPoseSafe(clone, snap.pose);
+                if (snap.swungHand) {
+                    try {
+                        clone.swingMainHand();
+                    } catch (Throwable ignored) {
+                    }
+                }
+            }
+
+            EntityEquipment eq = clone.getEquipment();
+            if (eq != null) {
+                if (clone instanceof ArmorStand) {
+                    if (snap.helmet != null && snap.helmet.getType() != Material.AIR) {
+                        eq.setHelmet(snap.helmet);
+                    } else {
+                        eq.setHelmet(getOrCreatePlayerSkull(snap.uuid, snap.name));
+                    }
+                } else {
+                    eq.setHelmet(snap.helmet);
                 }
                 eq.setChestplate(snap.chestplate);
                 eq.setLeggings(snap.leggings);
@@ -1762,18 +1848,31 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
                 eq.setItemInOffHand(snap.offHand);
             }
 
+            // Красная подсветка для манекена спидранера
+            if (speedrunnerUuid != null && speedrunnerUuid.equals(snap.uuid)) {
+                applyRedGlowToEntity(clone);
+            }
+
             if (snap.hurt) {
+                try {
+                    Method playHurt = clone.getClass().getMethod("playHurtAnimation", float.class);
+                    playHurt.invoke(clone, 0.0f);
+                } catch (Throwable ignored) {
+                }
                 for (Player viewer : Bukkit.getOnlinePlayers()) {
                     playSoundSafe(viewer, SOUND_PLAYER_HURT, 1.0f, 1.0f);
                 }
             }
         }
 
-        Iterator<Map.Entry<UUID, ArmorStand>> playerIt = replayPlayerClones.entrySet().iterator();
+        Iterator<Map.Entry<UUID, LivingEntity>> playerIt = replayPlayerClones.entrySet().iterator();
         while (playerIt.hasNext()) {
-            Map.Entry<UUID, ArmorStand> entry = playerIt.next();
+            Map.Entry<UUID, LivingEntity> entry = playerIt.next();
             if (!activePlayersInFrame.contains(entry.getKey())) {
-                if (entry.getValue() != null) entry.getValue().remove();
+                if (entry.getValue() != null) {
+                    removeEntityFromSpeedrunnerTeam(entry.getValue());
+                    entry.getValue().remove();
+                }
                 playerIt.remove();
             }
         }
@@ -1832,6 +1931,162 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         }
     }
 
+    private boolean isMannequinEntity(Entity ent) {
+        if (ent == null || ent.getType() == null) return false;
+        return "MANNEQUIN".equalsIgnoreCase(ent.getType().name());
+    }
+
+    @SuppressWarnings("deprecation")
+    private LivingEntity spawnReplayMannequinOrFallback(World w, PlayerSnapshot snap) {
+        LivingEntity clone = null;
+        try {
+            EntityType mannequinType = EntityType.valueOf("MANNEQUIN");
+            Entity spawned = w.spawnEntity(snap.location, mannequinType);
+            if (spawned instanceof LivingEntity) {
+                clone = (LivingEntity) spawned;
+                clone.setGravity(false);
+                clone.setInvulnerable(true);
+                clone.setSilent(true);
+                try {
+                    clone.setCollidable(false);
+                } catch (Throwable ignored) {
+                }
+                try {
+                    clone.setAI(false);
+                } catch (Throwable ignored) {
+                }
+                configureMannequinViaReflection(clone, snap);
+            }
+        } catch (Throwable ignored) {
+        }
+
+        if (clone == null) {
+            ArmorStand stand = w.spawn(snap.location, ArmorStand.class);
+            stand.setBasePlate(false);
+            stand.setArms(true);
+            stand.setGravity(false);
+            stand.setInvulnerable(true);
+            clone = stand;
+        }
+
+        clone.setCustomName(snap.displayName);
+        clone.setCustomNameVisible(true);
+        if (speedrunnerUuid != null && speedrunnerUuid.equals(snap.uuid)) {
+            applyRedGlowToEntity(clone);
+        }
+        return clone;
+    }
+
+    private void configureMannequinViaReflection(LivingEntity mannequin, PlayerSnapshot snap) {
+        // 1. Делаем манекен неподвижным (setImmovable(true))
+        try {
+            Method setImmovable = mannequin.getClass().getMethod("setImmovable", boolean.class);
+            setImmovable.invoke(mannequin, true);
+        } catch (Throwable ignored) {
+        }
+
+        // 2. Убираем стандартную подпись "NPC" под ником манекена
+        try {
+            Class<?> componentClass = Class.forName("net.kyori.adventure.text.Component");
+            Method setDesc = mannequin.getClass().getMethod("setDescription", componentClass);
+            setDesc.invoke(mannequin, new Object[]{null});
+        } catch (Throwable ignored) {
+            try {
+                Method setHideDesc = mannequin.getClass().getMethod("setHideDescription", boolean.class);
+                setHideDesc.invoke(mannequin, true);
+            } catch (Throwable ignored2) {
+            }
+        }
+
+        // 3. Применяем реальный скин игрока к манекену (Paper 26.3 ResolvableProfile или Spigot PlayerProfile)
+        if (snap.playerProfile != null) {
+            boolean applied = false;
+            try {
+                Class<?> resolvableClass = Class.forName("io.papermc.paper.datacomponent.item.ResolvableProfile");
+                Class<?> paperProfileClass = Class.forName("com.destroystokyo.paper.profile.PlayerProfile");
+                if (paperProfileClass.isInstance(snap.playerProfile)) {
+                    Method factory = resolvableClass.getMethod("resolvableProfile", paperProfileClass);
+                    Object resolvable = factory.invoke(null, snap.playerProfile);
+                    Method setProfile = mannequin.getClass().getMethod("setProfile", resolvableClass);
+                    setProfile.invoke(mannequin, resolvable);
+                    applied = true;
+                }
+            } catch (Throwable ignored) {
+            }
+
+            if (!applied) {
+                try {
+                    for (Method m : mannequin.getClass().getMethods()) {
+                        if (m.getName().equals("setPlayerProfile") && m.getParameterCount() == 1
+                                && m.getParameterTypes()[0].isInstance(snap.playerProfile)) {
+                            m.invoke(mannequin, snap.playerProfile);
+                            break;
+                        }
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+    }
+
+    private void applyMannequinPoseSafe(LivingEntity mannequin, Pose pose) {
+        if (mannequin == null || pose == null) return;
+        Pose targetPose = (pose == Pose.STANDING || pose == Pose.SNEAKING || pose == Pose.SWIMMING
+                || pose == Pose.FALL_FLYING || pose == Pose.SLEEPING) ? pose : Pose.STANDING;
+        try {
+            Method setPoseFixed = mannequin.getClass().getMethod("setPose", Pose.class, boolean.class);
+            setPoseFixed.invoke(mannequin, targetPose, true);
+            return;
+        } catch (Throwable ignored) {
+        }
+        try {
+            Method setPose = mannequin.getClass().getMethod("setPose", Pose.class);
+            setPose.invoke(mannequin, targetPose);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void applyRedGlowToEntity(Entity entity) {
+        if (entity == null) return;
+        try {
+            entity.setGlowing(true);
+            Scoreboard board = Bukkit.getScoreboardManager() != null
+                    ? Bukkit.getScoreboardManager().getMainScoreboard()
+                    : null;
+            if (board != null) {
+                Team srTeam = board.getTeam(TEAM_SPEEDRUNNER);
+                if (srTeam == null) {
+                    srTeam = board.registerNewTeam(TEAM_SPEEDRUNNER);
+                    srTeam.setColor(ChatColor.RED);
+                }
+                String entry = entity.getUniqueId().toString();
+                if (!srTeam.hasEntry(entry)) {
+                    srTeam.addEntry(entry);
+                }
+                replayTeamEntries.add(entry);
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void removeEntityFromSpeedrunnerTeam(Entity entity) {
+        if (entity == null) return;
+        try {
+            String entry = entity.getUniqueId().toString();
+            replayTeamEntries.remove(entry);
+            Scoreboard board = Bukkit.getScoreboardManager() != null
+                    ? Bukkit.getScoreboardManager().getMainScoreboard()
+                    : null;
+            if (board != null) {
+                Team srTeam = board.getTeam(TEAM_SPEEDRUNNER);
+                if (srTeam != null && srTeam.hasEntry(entry)) {
+                    srTeam.removeEntry(entry);
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
     @SuppressWarnings("deprecation")
     private ItemStack getOrCreatePlayerSkull(UUID uuid, String playerName) {
         ItemStack cached = cachedPlayerSkulls.get(uuid);
@@ -1850,10 +2105,30 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     }
 
     private void cleanupReplayEntities() {
-        for (ArmorStand stand : replayPlayerClones.values()) {
-            if (stand != null) stand.remove();
+        for (LivingEntity clone : replayPlayerClones.values()) {
+            if (clone != null) {
+                removeEntityFromSpeedrunnerTeam(clone);
+                clone.remove();
+            }
         }
         replayPlayerClones.clear();
+        try {
+            Scoreboard board = Bukkit.getScoreboardManager() != null
+                    ? Bukkit.getScoreboardManager().getMainScoreboard()
+                    : null;
+            if (board != null) {
+                Team srTeam = board.getTeam(TEAM_SPEEDRUNNER);
+                if (srTeam != null) {
+                    for (String entry : new ArrayList<>(replayTeamEntries)) {
+                        if (srTeam.hasEntry(entry)) {
+                            srTeam.removeEntry(entry);
+                        }
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        replayTeamEntries.clear();
         for (Entity ent : replayEntityClones.values()) {
             if (ent != null) ent.remove();
         }
@@ -2207,9 +2482,9 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         World defaultWorld = getMainOverworld();
         if (isWorldOceanFreeInRadius200(defaultWorld)) {
             activeOverworld = defaultWorld;
-            sender.sendMessage(ChatColor.GREEN + "[Manhunt] Текущий мир прошёл проверку фильтра сидов (океана в радиусе 200 блоков от 0:0 нет).");
+            sender.sendMessage(ChatColor.GREEN + "[Manhunt] Текущий мир прошёл проверку (океана в радиусе 200 блоков от 0:0 нет).");
         } else {
-            Bukkit.broadcastMessage(ChatColor.YELLOW + "[Manhunt] На (0, 0) обнаружен океан в радиусе 200 блоков! Генерируем новый мир с подходящим сидом...");
+            Bukkit.broadcastMessage(ChatColor.YELLOW + "[Manhunt] На (0, 0) обнаружен океан в радиусе 200 блоков! Генерируем новый мир без океана...");
             activeOverworld = createFilteredManhuntWorld(sender);
         }
 
@@ -2377,6 +2652,8 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
             p.teleport(defaultSpawn);
         }
 
+        huntersWinAnnouncedThisGame = false;
+        lastReplaySpectatorLoc = null;
         speedrunnerUuid = null;
         hunterUuids.clear();
         readyPlayers.clear();
@@ -2983,6 +3260,10 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         if (to == null) return;
 
         if (gamePaused || longTermStopped) {
+            player.setFallDistance(0.0f);
+            if (!player.getAllowFlight()) {
+                freezePlayerInPlaceSafely(player);
+            }
             if (from.getX() != to.getX() || from.getY() != to.getY() || from.getZ() != to.getZ()) {
                 event.setTo(from);
             }
@@ -3282,6 +3563,18 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         }
     }
 
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onPlayerKick(PlayerKickEvent event) {
+        if (gamePaused || longTermStopped) {
+            String reason = event.getReason() != null ? event.getReason().toLowerCase(Locale.ROOT) : "";
+            if (reason.contains("flying") || reason.contains("flight")
+                    || reason.contains("полет") || reason.contains("полёт")) {
+                event.setCancelled(true);
+                freezePlayerInPlaceSafely(event.getPlayer());
+            }
+        }
+    }
+
     @EventHandler
     public void onPlayerJoin(PlayerJoinEvent event) {
         Player p = event.getPlayer();
@@ -3306,21 +3599,28 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
             stopBossBar.addPlayer(p);
         }
 
+        if (gameState == GameState.REPLAYING_DEATH) {
+            restorePlayerMovement(p);
+            p.setGameMode(GameMode.SPECTATOR);
+            if (lastReplaySpectatorLoc != null) {
+                p.teleport(lastReplaySpectatorLoc);
+            }
+            return;
+        }
+
         if (longTermStopped) {
             Location savedLoc = frozenLocationsDuringStop.get(p.getUniqueId());
             if (savedLoc != null) {
                 p.teleport(savedLoc);
             }
-            p.setWalkSpeed(0.0f);
-            p.setFlySpeed(0.0f);
+            freezePlayerInPlaceSafely(p);
             return;
         }
 
         if (!gamePaused) {
             restorePlayerMovement(p);
         } else {
-            p.setWalkSpeed(0.0f);
-            p.setFlySpeed(0.0f);
+            freezePlayerInPlaceSafely(p);
         }
 
         if (isPreparationStage() && chosenStartLocation != null) {
@@ -3452,22 +3752,21 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     // ПОБЕДА СТОРОН
     // =========================================================================
 
-    private void triggerHuntersWinFinal() {
-        if (gameState == GameState.ENDED) return;
+    private void announceHuntersWinOnce() {
+        if (huntersWinAnnouncedThisGame) return;
+        huntersWinAnnouncedThisGame = true;
         longTermStopped = false;
         if (stopBossBar != null) {
             stopBossBar.removeAll();
             stopBossBar = null;
         }
-        stopPauseImmediately(true);
         clearSavedGameStateFile();
-        gameState = GameState.ENDED;
         updateSidebarScoreboard();
 
         Bukkit.broadcastMessage(ChatColor.GOLD + "=============================================");
         Bukkit.broadcastMessage(ChatColor.BLUE + "Спидранер погиб! Победа Охотников (Hunters Wins!!)!");
         Bukkit.broadcastMessage(ChatColor.YELLOW + "Итоговое время игры: " + ChatColor.GREEN + formatHhMmSs(elapsedGameSeconds));
-        Bukkit.broadcastMessage(ChatColor.YELLOW + "Для полного завершения пропишите: /manhunt game end");
+        Bukkit.broadcastMessage(ChatColor.YELLOW + "Повтор смерти зациклен. Для завершения игры пропишите: /manhunt game end");
         Bukkit.broadcastMessage(ChatColor.GOLD + "=============================================");
 
         for (Player p : Bukkit.getOnlinePlayers()) {
@@ -3477,6 +3776,13 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
             p.sendTitle(ChatColor.BLUE + "Hunters Wins!!", ChatColor.YELLOW + "Спидранер погиб!", 10, 100, 20);
             playSoundSafe(p, SOUND_CHALLENGE_COMPLETE, 1.0f, 1.0f);
         }
+    }
+
+    private void triggerHuntersWinFinal() {
+        if (gameState == GameState.ENDED) return;
+        stopPauseImmediately(true);
+        gameState = GameState.ENDED;
+        announceHuntersWinOnce();
     }
 
     private void triggerSpeedrunnerWin() {
@@ -3788,7 +4094,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     }
 
     private void sendFullModInfo(CommandSender sender) {
-        sender.sendMessage(ChatColor.GOLD + "========== Информация о моде Asonsss_manhunt (v1.5.1) ==========");
+        sender.sendMessage(ChatColor.GOLD + "========== Информация о моде Asonsss_manhunt (v1.5.2) ==========");
         sender.sendMessage(ChatColor.AQUA + "Команды администратора:");
         sender.sendMessage(ChatColor.YELLOW + " • /manhunt game start_prepare (или start) " + ChatColor.GRAY + "— отфильтровать мир без океана у 0:0 и начать подготовку");
         sender.sendMessage(ChatColor.YELLOW + " • /manhunt speedruner add/remove <Игрок> " + ChatColor.GRAY + "— назначить или удалить спидранера");
@@ -3799,7 +4105,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         sender.sendMessage(ChatColor.RED + "Команды спидранера (по порядку):");
         sender.sendMessage(ChatColor.YELLOW + " • /sp difficulty select <easy|medium|hard|impossible> " + ChatColor.GRAY + "— выбрать сложность игры");
         sender.sendMessage(ChatColor.YELLOW + " • /sp pickplace start " + ChatColor.GRAY + "— полёт в режиме Наблюдателя в пределах зоны спавна");
-        sender.sendMessage(ChatColor.YELLOW + " • /sp restart " + ChatColor.GRAY + "— пересоздать мир с новым сидом (без океана в 200 блоках) во время выбора места");
+        sender.sendMessage(ChatColor.YELLOW + " • /sp restart " + ChatColor.GRAY + "— пересоздать мир (без океана в 200 блоках) во время выбора места");
         sender.sendMessage(ChatColor.YELLOW + " • /sp pickplace end " + ChatColor.GRAY + "— зафиксировать место старта и телепортировать всех игроков");
         sender.sendMessage(ChatColor.YELLOW + " • /fortrest " + ChatColor.GRAY + "— узнать координаты ближайшей крепости Ада (только на EASY)");
 
@@ -3816,7 +4122,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     }
 
     private void sendManhuntHelp(CommandSender sender) {
-        sender.sendMessage(ChatColor.GOLD + "=== Команды Asonsss_manhunt (v1.5.1) ===");
+        sender.sendMessage(ChatColor.GOLD + "=== Команды Asonsss_manhunt (v1.5.2) ===");
         sender.sendMessage(ChatColor.YELLOW + "/manhunt info " + ChatColor.GRAY + "— полное описание всех команд мода");
         sender.sendMessage(ChatColor.YELLOW + "/manhunt difficulty info " + ChatColor.GRAY + "— информация о сложностях");
         sender.sendMessage(ChatColor.YELLOW + "/manhunt game start_prepare (или start) " + ChatColor.GRAY + "— начать подготовку к игре");
