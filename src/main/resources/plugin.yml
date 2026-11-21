@@ -1,9 +1,9 @@
 name: Asonsss_manhunt
-version: '1.5.2'
+version: '1.6.0'
 main: me.asonsss.manhunt.AsonsssManhunt
 api-version: '1.21'
 authors: [Asonsss]
-description: Custom Manhunt plugin v1.5.2 (Mannequin looped replay, red runner glow, anti-fly-kick on /stop, /seed blocked)
+description: Custom Manhunt plugin v1.6.0 (30s speedrunner hit-to-start window, death teleport fix)
 
 commands:
   manhunt:

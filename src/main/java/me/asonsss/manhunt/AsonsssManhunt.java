@@ -107,14 +107,14 @@ import java.util.UUID;
 import java.util.stream.Collectors;
 
 /**
- * Полный исходный код плагина: Asonsss_manhunt (Версия 1.5.2 — Исправление под Paper 26.3)
+ * Полный исходный код плагина: Asonsss_manhunt (Версия 1.6.0 — Исправление под Paper 26.3)
  *
  * ======================== 1. ФАЙЛ src/main/resources/plugin.yml ========================
  * name: Asonsss_manhunt
- * version: '1.5.2'
+ * version: '1.6.0'
  * main: me.asonsss.manhunt.AsonsssManhunt
  * api-version: '1.21'
- * description: Manhunt plugin v1.5.2 for Paper 26.3 with /sp restart, 200-block ocean seed filter, 10s death replay, /stop & /resume
+ * description: Manhunt plugin v1.6.0 for Paper 26.3 with /sp restart, 200-block ocean seed filter, 10s death replay, /stop & /resume
  * commands:
  *   manhunt:
  *     description: Основная команда управления Manhunt
@@ -154,7 +154,7 @@ import java.util.stream.Collectors;
  *     <modelVersion>4.0.0</modelVersion>
  *     <groupId>me.asonsss</groupId>
  *     <artifactId>Asonsss_manhunt</artifactId>
- *     <version>1.5.2</version>
+ *     <version>1.6.0</version>
  *     <packaging>jar</packaging>
  *     <properties>
  *         <maven.compiler.source>21</maven.compiler.source>
@@ -187,6 +187,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         PICKING_PLACE,
         WAITING_READY,
         COUNTDOWN,
+        PRE_HIT_WAIT,
         IN_GAME,
         REPLAYING_DEATH,
         ENDED
@@ -460,6 +461,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     private final Random random = new Random();
 
     private BukkitTask countdownTask = null;
+    private BukkitTask preHitWaitTask = null;
     private BukkitTask gameLoopTask = null;
     private BukkitTask scoreboardAndTimerTask = null;
     private BukkitTask replayRecordingTask = null;
@@ -520,7 +522,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
 
         loadSavedGameStateIfPresent();
 
-        getLogger().info("Asonsss_manhunt v1.5.2 успешно запущен!");
+        getLogger().info("Asonsss_manhunt v1.6.0 успешно запущен!");
     }
 
     @Override
@@ -2143,7 +2145,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         scoreboardAndTimerTask = new BukkitRunnable() {
             @Override
             public void run() {
-                if (isPreparationStage() || gameState == GameState.COUNTDOWN) {
+                if (isPreparationStage() || gameState == GameState.COUNTDOWN || gameState == GameState.PRE_HIT_WAIT) {
                     World overworld = getMainOverworld();
                     if (overworld != null) {
                         overworld.setTime(0L);
@@ -2826,7 +2828,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
                 } else {
                     this.cancel();
                     countdownTask = null;
-                    beginActiveGame();
+                    startPreHitWaitPhase();
                 }
             }
         }.runTaskTimer(this, 0L, 20L);
@@ -2855,6 +2857,47 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
             countdownTask.cancel();
             countdownTask = null;
         }
+        cancelPreHitWait();
+    }
+
+    private void cancelPreHitWait() {
+        if (preHitWaitTask != null) {
+            preHitWaitTask.cancel();
+            preHitWaitTask = null;
+        }
+    }
+
+    private void startPreHitWaitPhase() {
+        cancelPreHitWait();
+        gameState = GameState.PRE_HIT_WAIT;
+        readyPlayers.clear();
+        removeWaitingBox();
+
+        // Включаем PvP, чтобы спидранер мог ударить любого игрока и запустить игру
+        for (World w : Bukkit.getWorlds()) {
+            try {
+                w.setPVP(true);
+            } catch (Throwable ignored) {
+            }
+        }
+
+        for (Player p : Bukkit.getOnlinePlayers()) {
+            p.setGlowing(false);
+            restorePlayerMovement(p);
+            p.sendTitle(ChatColor.GREEN + "Игра начинается...", "", 5, 40, 10);
+            playSoundSafe(p, SOUND_LEVELUP, 1.0f, 1.0f);
+        }
+
+        // Дополнительные 30 секунд до автоматического старта, если спидранер никого не ударит
+        preHitWaitTask = new BukkitRunnable() {
+            @Override
+            public void run() {
+                preHitWaitTask = null;
+                if (gameState == GameState.PRE_HIT_WAIT) {
+                    beginActiveGame();
+                }
+            }
+        }.runTaskLater(this, 30L * 20L);
     }
 
     private void cancelCountdownAndRestoreBorder() {
@@ -2874,6 +2917,8 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     // =========================================================================
 
     private void beginActiveGame() {
+        if (gameState == GameState.IN_GAME) return;
+        cancelPreHitWait();
         gameState = GameState.IN_GAME;
         elapsedGameSeconds = 0L;
         pauseCooldownEndMillis = 0L;
@@ -2891,7 +2936,6 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
             p.setGlowing(false);
             restorePlayerMovement(p);
             p.sendTitle(ChatColor.GREEN + "ИГРА НАЧАЛАСЬ!", ChatColor.YELLOW + "Удачи!", 5, 40, 10);
-            playSoundSafe(p, SOUND_LEVELUP, 1.0f, 1.0f);
             playSoundSafe(p, SOUND_WITHER_SPAWN, 1.0f, 1.0f);
         }
         readyPlayers.clear();
@@ -3012,7 +3056,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
         gameLoopTask = new BukkitRunnable() {
             @Override
             public void run() {
-                if (gameState != GameState.IN_GAME && gameState != GameState.WAITING_READY && gameState != GameState.COUNTDOWN) {
+                if (gameState != GameState.IN_GAME && gameState != GameState.WAITING_READY && gameState != GameState.COUNTDOWN && gameState != GameState.PRE_HIT_WAIT) {
                     return;
                 }
                 if (gamePaused || longTermStopped) {
@@ -3492,6 +3536,16 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
             return;
         }
 
+        if (gameState == GameState.PRE_HIT_WAIT) {
+            Player attacker = resolveAttackerPlayer(event.getDamager());
+            if (attacker != null && speedrunnerUuid != null && speedrunnerUuid.equals(attacker.getUniqueId())) {
+                beginActiveGame();
+                return;
+            }
+            event.setCancelled(true);
+            return;
+        }
+
         if (isPreparationStage() || gameState == GameState.COUNTDOWN) {
             if (event.getEntity() instanceof Player) {
                 Player attacker = resolveAttackerPlayer(event.getDamager());
@@ -3537,6 +3591,10 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
             event.setCancelled(true);
             return;
         }
+        if (gameState == GameState.PRE_HIT_WAIT && !(event instanceof EntityDamageByEntityEvent)) {
+            event.setCancelled(true);
+            return;
+        }
         if (gameState == GameState.IN_GAME && event.getEntity() instanceof Player) {
             hurtThisTick.add(event.getEntity().getUniqueId());
         }
@@ -3555,7 +3613,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     public void onFoodLevelChange(FoodLevelChangeEvent event) {
-        if (gamePaused || longTermStopped || isPreparationStage() || gameState == GameState.COUNTDOWN) {
+        if (gamePaused || longTermStopped || isPreparationStage() || gameState == GameState.COUNTDOWN || gameState == GameState.PRE_HIT_WAIT) {
             event.setCancelled(true);
             if (event.getEntity() instanceof Player) {
                 ((Player) event.getEntity()).setFoodLevel(20);
@@ -3660,13 +3718,50 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
 
         if (gameState == GameState.IN_GAME && speedrunnerUuid != null && speedrunnerUuid.equals(deceased.getUniqueId())) {
             Location deathLoc = deceased.getLocation().clone();
-            Bukkit.getScheduler().runTaskLater(this, () -> startDeathReplayAndThenHuntersWin(deathLoc), 2L);
+            lastReplaySpectatorLoc = deathLoc.clone().add(0.0, 2.5, 0.0);
+            // Автоматически возрождаем спидранера через 1 тик, чтобы он сразу перенёсся на точку своей смерти
+            Bukkit.getScheduler().runTaskLater(this, () -> {
+                if (deceased.isOnline() && deceased.isDead()) {
+                    try {
+                        deceased.spigot().respawn();
+                    } catch (Throwable ignored) {
+                    }
+                }
+            }, 1L);
+            Bukkit.getScheduler().runTaskLater(this, () -> startDeathReplayAndThenHuntersWin(deathLoc), 3L);
         }
     }
 
     @EventHandler(priority = EventPriority.HIGHEST)
     public void onPlayerRespawn(PlayerRespawnEvent event) {
         Player player = event.getPlayer();
+
+        if ((gameState == GameState.REPLAYING_DEATH || gameState == GameState.ENDED) && lastReplaySpectatorLoc != null) {
+            event.setRespawnLocation(lastReplaySpectatorLoc);
+            Bukkit.getScheduler().runTaskLater(this, () -> {
+                if (player.isOnline() && (gameState == GameState.REPLAYING_DEATH || gameState == GameState.ENDED)) {
+                    restorePlayerMovement(player);
+                    player.setGameMode(GameMode.SPECTATOR);
+                    if (lastReplaySpectatorLoc != null) {
+                        player.teleport(lastReplaySpectatorLoc);
+                    }
+                }
+            }, 1L);
+            return;
+        }
+
+        if (speedrunnerUuid != null && speedrunnerUuid.equals(player.getUniqueId())
+                && lastReplaySpectatorLoc != null && gameState == GameState.IN_GAME) {
+            event.setRespawnLocation(lastReplaySpectatorLoc);
+            Bukkit.getScheduler().runTaskLater(this, () -> {
+                if (player.isOnline() && lastReplaySpectatorLoc != null) {
+                    restorePlayerMovement(player);
+                    player.setGameMode(GameMode.SPECTATOR);
+                    player.teleport(lastReplaySpectatorLoc);
+                }
+            }, 1L);
+            return;
+        }
 
         if (isPreparationStage() && chosenStartLocation != null) {
             event.setRespawnLocation(chosenStartLocation);
@@ -4094,7 +4189,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     }
 
     private void sendFullModInfo(CommandSender sender) {
-        sender.sendMessage(ChatColor.GOLD + "========== Информация о моде Asonsss_manhunt (v1.5.2) ==========");
+        sender.sendMessage(ChatColor.GOLD + "========== Информация о моде Asonsss_manhunt (v1.6.0) ==========");
         sender.sendMessage(ChatColor.AQUA + "Команды администратора:");
         sender.sendMessage(ChatColor.YELLOW + " • /manhunt game start_prepare (или start) " + ChatColor.GRAY + "— отфильтровать мир без океана у 0:0 и начать подготовку");
         sender.sendMessage(ChatColor.YELLOW + " • /manhunt speedruner add/remove <Игрок> " + ChatColor.GRAY + "— назначить или удалить спидранера");
@@ -4122,7 +4217,7 @@ public class AsonsssManhunt extends JavaPlugin implements Listener, CommandExecu
     }
 
     private void sendManhuntHelp(CommandSender sender) {
-        sender.sendMessage(ChatColor.GOLD + "=== Команды Asonsss_manhunt (v1.5.2) ===");
+        sender.sendMessage(ChatColor.GOLD + "=== Команды Asonsss_manhunt (v1.6.0) ===");
         sender.sendMessage(ChatColor.YELLOW + "/manhunt info " + ChatColor.GRAY + "— полное описание всех команд мода");
         sender.sendMessage(ChatColor.YELLOW + "/manhunt difficulty info " + ChatColor.GRAY + "— информация о сложностях");
         sender.sendMessage(ChatColor.YELLOW + "/manhunt game start_prepare (или start) " + ChatColor.GRAY + "— начать подготовку к игре");
